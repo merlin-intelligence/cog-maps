@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    container_name: eigenmind_qdrant
+    restart: always
+    # Bind to localhost only — Qdrant has no auth of its own unless
+    # QDRANT_API_KEY is set below, and the app expects to reach it locally.
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Set QDRANT_API_KEY in your .env file}
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  qdrant_storage:

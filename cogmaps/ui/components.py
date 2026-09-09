@@ -1,0 +1,301 @@
+"""Reusable Streamlit components: sidebar, NLP loader, embedder cache, misc UI helpers."""
+from __future__ import annotations
+
+import html
+import logging
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+import nltk
+import requests
+import spacy
+import streamlit as st
+import torch
+from spacy.cli import download as spacy_download
+
+from cogmaps.config import (
+    NEBIUS_MODELS,
+    llm_provider,
+    ollama_host,
+    ollama_models,
+    qdrant_host,
+    qdrant_port,
+)
+from cogmaps.config import nebius_api_key as env_nebius_key
+from cogmaps.core.embeddings import EmbeddingModel
+from cogmaps.ui.auth import (
+    UserDBError,
+    current_user,
+    hash_password,
+    is_admin,
+    load_user_db,
+    logout,
+    save_user_db,
+    verify_password,
+)
+from cogmaps.qdrant.store import QdrantStore
+
+
+@dataclass
+class SidebarState:
+    qdrant_host: str
+    qdrant_port: int
+    is_connected: bool
+    selected_device: str
+    llm_provider: str
+    llm_model: str
+    nebius_api_key: str
+    ollama_host: str
+    llm_ready: bool
+
+
+@st.cache_resource
+def load_nlp():
+    """Load (and download on demand) the spaCy English model used by the graph explorer."""
+    try:
+        model = spacy.load("en_core_web_sm")
+    except OSError:
+        spacy_download("en_core_web_sm")
+        model = spacy.load("en_core_web_sm")
+    nltk.download("stopwords", quiet=True)
+    return model
+
+
+@st.cache_resource
+def get_embedder(device: str) -> EmbeddingModel:
+    """Process-wide cached embedding model.
+
+    Streamlit's ``cache_resource`` keeps a single instance per (device,) key for the
+    lifetime of the server process — shared across all sessions and users. Do not
+    ``release()`` the returned instance; let the cache own its lifecycle.
+    """
+    return EmbeddingModel(device=device)
+
+
+def _detect_devices() -> list[str]:
+    devices = ["cpu"]
+    if torch.cuda.is_available():
+        devices.insert(0, "cuda")
+    if torch.backends.mps.is_available():
+        devices.insert(0, "mps")
+    return devices
+
+
+def list_ollama_models(host: str) -> list[str]:
+    """Return the models installed on a local Ollama server.
+
+    Queries ``GET /api/tags``. Returns an empty list if the server is unreachable
+    (which the caller treats as "Ollama offline").
+    """
+    try:
+        resp = requests.get(f"{host.rstrip('/')}/api/tags", timeout=2)
+        resp.raise_for_status()
+        models = sorted(m["name"] for m in resp.json().get("models", []))
+        logger.debug("Ollama models at %s: %s", host, models)
+        return models
+    except (requests.RequestException, ValueError, KeyError) as e:
+        logger.warning("Ollama unreachable at %s: %s", host, e)
+        return []
+
+
+def _render_llm_settings() -> tuple[str, str, str, str, bool]:
+    """Render the 'llm settings' sidebar block for the active provider.
+
+    Returns ``(provider, model, nebius_api_key, ollama_host_url, llm_ready)``.
+    """
+    st.markdown(
+        '<p style="font-family:\'DM Mono\',monospace;font-size:0.68rem;'
+        'letter-spacing:0.15em;color:#8a6a50;text-transform:uppercase;'
+        'margin-bottom:0.8rem">🤖 llm settings</p>',
+        unsafe_allow_html=True,
+    )
+
+    providers = ["nebius", "ollama"]
+    labels = {"nebius": "Nebius (cloud)", "ollama": "Ollama (local)"}
+    default_provider = llm_provider()
+    provider = st.radio(
+        "backend",
+        providers,
+        index=providers.index(default_provider) if default_provider in providers else 0,
+        format_func=lambda p: labels[p],
+        horizontal=True,
+        help="Where /ask/ generates answers. LLM_PROVIDER sets the initial choice.",
+    )
+
+    if provider == "ollama":
+        host_url = ollama_host()
+        installed = list_ollama_models(host_url)
+        cls, txt = ("online", "ollama online") if installed else ("offline", "ollama offline")
+        st.markdown(f'<div class="status-pill {cls}">{txt}</div>', unsafe_allow_html=True)
+
+        options = installed or ollama_models()
+        if options:
+            model = st.selectbox(
+                "model", options,
+                help="Local Ollama model used in the Chat page.",
+            )
+        else:
+            model = ""
+            st.caption("No models found. Pull one first, e.g. `ollama pull qwen2.5:7b`.")
+        ready = bool(installed) and bool(model)
+        st.markdown(
+            '<p style="font-family:\'DM Mono\',monospace;font-size:0.6rem;'
+            'color:#8a6a50;text-align:center;margin-top:-0.5rem">Powered by Ollama (local)</p>',
+            unsafe_allow_html=True,
+        )
+        return provider, model, "", host_url, ready
+
+    # Default provider: Nebius / AI Hub cloud
+    api_key = env_nebius_key()
+    try:
+        if "NEBIUS_API_KEY" in st.secrets:
+            api_key = st.secrets["NEBIUS_API_KEY"]
+    except Exception:
+        pass
+
+    model = st.selectbox(
+        "model",
+        NEBIUS_MODELS,
+        format_func=lambda x: x.split("/")[-1],
+        help="Model used in the Chat page.",
+    )
+    st.markdown(
+        '<p style="font-family:\'DM Mono\',monospace;font-size:0.6rem;'
+        'color:#8a6a50;text-align:center;margin-top:-0.5rem">Powered by AI Hub</p>',
+        unsafe_allow_html=True,
+    )
+    return provider, model, api_key, ollama_host(), bool(api_key)
+
+
+def render_sidebar() -> SidebarState:
+    """Render the shared sidebar (host/port, device, LLM model, profile) and return its state."""
+    with st.sidebar:
+        st.markdown(
+            '<p style="font-family:\'DM Mono\',monospace;font-size:0.68rem;'
+            'letter-spacing:0.15em;color:#8a6a50;text-transform:uppercase;'
+            'margin-bottom:1.2rem">⬡ navigation</p>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("---")
+        st.markdown(
+            '<p style="font-family:\'DM Mono\',monospace;font-size:0.68rem;'
+            'letter-spacing:0.15em;color:#8a6a50;text-transform:uppercase;'
+            'margin-bottom:0.8rem">⚙ corpus settings</p>',
+            unsafe_allow_html=True,
+        )
+
+        # Letting any authenticated user point the server at an arbitrary
+        # host/port is an SSRF vector — only admins can override the
+        # env-configured Qdrant endpoint.
+        if is_admin():
+            host = st.text_input("host", qdrant_host())
+            port = st.number_input("port", min_value=1, max_value=65535, value=qdrant_port())
+        else:
+            host = qdrant_host()
+            port = qdrant_port()
+            st.caption(f"qdrant: `{host}:{port}`")
+
+        is_connected = QdrantStore.is_reachable(host, port)
+        cls, txt = ("online", "qdrant online") if is_connected else ("offline", "qdrant offline")
+        st.markdown(f'<div class="status-pill {cls}">{txt}</div>', unsafe_allow_html=True)
+
+        st.markdown("---")
+        device = st.selectbox("embedding device", _detect_devices())
+
+        st.markdown("---")
+        provider, model, api_key, ollama_host_url, llm_ready = _render_llm_settings()
+
+        st.markdown("---")
+        user = current_user()
+        st.markdown(
+            f'<p style="font-family:\'DM Mono\',monospace;font-size:0.65rem;'
+            f'color:var(--rust);text-align:center;text-transform:uppercase;">● USER: {html.escape(user)}</p>',
+            unsafe_allow_html=True,
+        )
+        if st.button("sign out", use_container_width=True):
+            logout()
+            st.rerun()
+
+        st.markdown(
+            '<p style="font-family:\'DM Mono\',monospace; font-size:0.7rem; '
+            'color:var(--text-muted); text-align:center; margin-top:1rem;">PROFILE SETTINGS</p>',
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            st.markdown(
+                '<p style="font-family:\'DM Mono\',monospace; font-size:0.6rem; '
+                'color:var(--text-muted); margin-bottom:0.5rem; text-align:center;">CHANGE PASSWORD</p>',
+                unsafe_allow_html=True,
+            )
+            old_p = st.text_input("current password", type="password", key="cp_old",
+                                  label_visibility="collapsed", placeholder="current password")
+            new_p = st.text_input("new password", type="password", key="cp_new",
+                                  label_visibility="collapsed", placeholder="new password")
+            confirm_p = st.text_input("confirm new password", type="password", key="cp_confirm",
+                                      label_visibility="collapsed", placeholder="confirm new password")
+            if st.button("update password", use_container_width=True):
+                if not old_p or not new_p or not confirm_p:
+                    st.error("Fill all fields.")
+                elif new_p != confirm_p:
+                    st.error("New passwords don't match.")
+                else:
+                    try:
+                        db = load_user_db()
+                    except UserDBError as e:
+                        st.error(f"Could not update password: {e}")
+                    else:
+                        if verify_password(old_p, db["users"].get(user, "")):
+                            db["users"][user] = hash_password(new_p)
+                            save_user_db(db)
+                            st.success("Password updated!")
+                        else:
+                            st.error("Incorrect current password.")
+
+        st.markdown(
+            '<p style="font-family:\'DM Mono\',monospace;font-size:0.6rem;'
+            'color:#a09080;text-align:center;margin-top:1rem;">© 2025 Prax Value Eurl</p>',
+            unsafe_allow_html=True,
+        )
+
+    return SidebarState(
+        qdrant_host=host,
+        qdrant_port=int(port),
+        is_connected=is_connected,
+        selected_device=device,
+        llm_provider=provider,
+        llm_model=model,
+        nebius_api_key=api_key,
+        ollama_host=ollama_host_url,
+        llm_ready=llm_ready,
+    )
+
+
+def empty_state(icon: str, message: str) -> None:
+    st.markdown(
+        f'<div class="empty-state"><span class="icon">{icon}</span>{message}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def section_header(title: str, tag: str) -> None:
+    st.markdown(
+        f'<div class="section-header"><span class="title">{title}</span>'
+        f'<span class="tag">→ {tag}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def info_box(html: str) -> None:
+    st.markdown(f'<div class="info-box">{html}</div>', unsafe_allow_html=True)
+
+
+def metric_card(label: str, value: str, sub: str = "", *, value_style: str = "") -> str:
+    """Return the HTML for a metric card. Pair with ``st.markdown(..., unsafe_allow_html=True)``."""
+    style_attr = f' style="{value_style}"' if value_style else ""
+    return (
+        f'<div class="metric-card"><div class="label">{label}</div>'
+        f'<div class="value"{style_attr}>{value}</div>'
+        f'<div class="sub">{sub}</div></div>'
+    )

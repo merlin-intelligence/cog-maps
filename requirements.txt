@@ -1,0 +1,37 @@
+# Legacy flat install (prefer `pip install -e .`, which reads pyproject.toml
+# and supports the optional [gdrive]/[sharepoint]/[dev] extras individually).
+# Keep this file's core section in sync with pyproject.toml's `dependencies`.
+
+# ── Core ──
+streamlit
+torch
+transformers
+numpy
+nltk
+qdrant-client
+requests
+sentence-transformers
+matplotlib
+pandas
+openpyxl
+chunknorris
+markitdown[pptx]
+pyvis
+networkx
+spacy
+scipy
+scikit-learn
+wordcloud
+python-dotenv
+eigenmind==0.1.1
+
+# ── Optional: Google Drive connector (pyproject extra: gdrive) ──
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+
+# ── Optional: SharePoint connector (pyproject extra: sharepoint) ──
+Office365-REST-Python-Client
+
+# Dev-only tooling (tests, linter) does NOT belong here — it bloats production
+# installs. Use `pip install -e ".[dev]"` or `pip install pytest ruff` instead.

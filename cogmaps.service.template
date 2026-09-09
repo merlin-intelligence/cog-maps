@@ -1,0 +1,18 @@
+[Unit]
+Description=CogMaps Streamlit application
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=...
+Group=...
+WorkingDirectory=...
+ExecStart=.../venv/bin/python -m streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:.../streamlit.log
+StandardError=append:.../streamlit.log
+
+[Install]
+WantedBy=multi-user.target
