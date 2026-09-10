@@ -21,6 +21,11 @@ from pyvis.network import Network
 
 from cogmaps.config import (
     DOCUMENT_COLORS,
+    GRAPH_BG_COLOR,
+    GRAPH_EDGE_COLOR,
+    GRAPH_METHODS_EDGE_COLOR,
+    GRAPH_PROMPT_TEXT_COLOR,
+    GRAPH_TEXT_COLOR,
     MAX_CHUNKS,
     METHOD_COLORS,
     NODE_BASE_SIZE,
@@ -47,6 +52,7 @@ class ExplorerArtifacts:
     methods_html: str
     excel_path: str
     ranked_chunks: list[dict] = field(default_factory=list)
+    document_colors: dict[str, str] = field(default_factory=dict)
 
 
 def _generate_filename_from_prompt(prompt: str, extension: str = ".html") -> str:
@@ -85,13 +91,11 @@ def _freeze_physics_after_stabilization(path: str) -> None:
 def _scale_node_sizes(degrees: np.ndarray) -> list[int]:
     """Map node degrees to pyvis sizes, always within [NODE_BASE_SIZE, NODE_BASE_SIZE + NODE_SIZE_MULTIPLIER * 10].
 
-    The previous formula (``NODE_BASE_SIZE + degree * NODE_SIZE_MULTIPLIER``)
-    had no upper bound — on a small or textually homogeneous corpus the
-    similarity graph is near-complete, so every node's degree (and hence
-    size) is uniformly huge, making the graph unreadable. Sizing is now
-    always relative to the *graph's own* max degree, log-compressed so a few
-    hub nodes don't dominate, and clamped to a fixed, always-legible range
-    regardless of the corpus.
+    Sizing is relative to the *graph's own* max degree, log-compressed so a
+    few hub nodes don't dominate, and clamped to a fixed, always-legible
+    range regardless of the corpus — including on a small or textually
+    homogeneous corpus, where the similarity graph is near-complete and
+    every node's degree is otherwise uniformly huge.
     """
     if len(degrees) == 0:
         return []
@@ -124,6 +128,25 @@ _PHYSICS = {
         },
         "stabilization": {"iterations": 1000, "fit": True},
     },
+    "edges": {"color": {"color": GRAPH_EDGE_COLOR, "highlight": GRAPH_EDGE_COLOR}},
+    "configure": {"enabled": True, "filter": "physics", "showButton": True},
+}
+
+# The methods graph has far fewer nodes than the main graph (~15-30 vs. up to
+# MAX_CHUNKS), so it needs a looser layout: a longer spring length and a much
+# stronger avoidOverlap keep the small node set spread out instead of
+# clumping together, which barnesHut's generic tuning above tends to do.
+_METHODS_PHYSICS = {
+    "physics": {
+        "solver": "barnesHut",
+        "barnesHut": {
+            "gravitationalConstant": -6000, "centralGravity": 0.2,
+            "springLength": 180, "springConstant": 0.03,
+            "damping": 0.12, "avoidOverlap": 0.8,
+        },
+        "stabilization": {"iterations": 1000, "fit": True},
+    },
+    "edges": {"color": {"color": GRAPH_METHODS_EDGE_COLOR, "highlight": GRAPH_METHODS_EDGE_COLOR}},
     "configure": {"enabled": True, "filter": "physics", "showButton": True},
 }
 
@@ -155,9 +178,9 @@ class GraphExplorer:
         Pass ``render_artifacts=False`` to skip the two pyvis HTML renders and
         the Excel export — only ``ranked_chunks``/``summary_text`` are computed.
         Used by the Chat page's hybrid RAG retrieval (:mod:`cogmaps.rag.pipeline`),
-        which only reads ``ranked_chunks`` and previously paid for a full pyvis
-        render (with 1000 physics-stabilization iterations) plus an Excel export
-        on every single question, for files it then discarded unread.
+        which only reads ``ranked_chunks`` and has no use for a full pyvis render
+        (with 1000 physics-stabilization iterations) or an Excel export on every
+        single question.
         """
         logger.info("Graph explore collection=%r prompt=%r", collection_name, prompt[:80])
         os.makedirs(output_dir, exist_ok=True)
@@ -169,9 +192,9 @@ class GraphExplorer:
         graph = SimilarityGraph(retrieved)
 
         # 1. Main graph HTML
-        main_html = (
+        main_html, document_colors = (
             self._render_main_graph(graph, prompt, initial_point_ids, output_dir)
-            if render_artifacts else ""
+            if render_artifacts else ("", {})
         )
 
         # 2. Eigenvalue analysis
@@ -216,20 +239,25 @@ class GraphExplorer:
             methods_html=methods_html,
             excel_path=excel_path,
             ranked_chunks=ranked_chunks,
+            document_colors=document_colors,
         )
 
     # ─── private rendering helpers ─────────────────────────────────
 
-    def _render_main_graph(self, graph: SimilarityGraph, prompt: str, initial_ids: set, output_dir: str) -> str:
+    def _render_main_graph(
+        self, graph: SimilarityGraph, prompt: str, initial_ids: set, output_dir: str,
+    ) -> tuple[str, dict[str, str]]:
         path = os.path.join(output_dir, _generate_filename_from_prompt(prompt, ".html"))
         net = Network(height="900px", width="100%", notebook=False, directed=False,
-                      bgcolor="#222222", font_color="white")
+                      bgcolor=GRAPH_BG_COLOR, font_color=GRAPH_TEXT_COLOR)
         prompt_node_id = -1
         # pyvis renders `title` as HTML in the node tooltip — escape both the
         # user's prompt and the corpus text below, or a crafted document could
         # execute JS for anyone who hovers the node (stored XSS).
         net.add_node(prompt_node_id, label="PROMPT", title=html.escape(prompt), shape="box",
-                     color=PROMPT_NODE_COLOR, size=30)
+                     color=PROMPT_NODE_COLOR,
+                     font={"color": GRAPH_PROMPT_TEXT_COLOR, "size": 28},
+                     widthConstraint={"minimum": 140}, heightConstraint={"minimum": 60})
 
         unique_files = sorted({p.payload.get("filename") for p in graph.points})
         file_color = {fn: DOCUMENT_COLORS[i % len(DOCUMENT_COLORS)] for i, fn in enumerate(unique_files)}
@@ -270,7 +298,7 @@ class GraphExplorer:
         net.add_edges(edges)
         net.save_graph(path)
         _freeze_physics_after_stabilization(path)
-        return path
+        return path, file_color
 
     def _render_methods_graph(
         self, graph: SimilarityGraph, prompt: str, initial_ids: set,
@@ -279,13 +307,36 @@ class GraphExplorer:
     ) -> str:
         path = os.path.join(output_dir, _generate_filename_from_prompt(prompt, "_methods.html"))
         net = Network(height="900px", width="100%", notebook=False, directed=False,
-                      bgcolor="#222222", font_color="white")
+                      bgcolor=GRAPH_BG_COLOR, font_color=GRAPH_TEXT_COLOR)
         prompt_node_id = -1
         net.add_node(prompt_node_id, label="PROMPT", title=html.escape(prompt), shape="box",
-                     color=PROMPT_NODE_COLOR, size=30)
+                     color=PROMPT_NODE_COLOR,
+                     font={"color": GRAPH_PROMPT_TEXT_COLOR, "size": 28},
+                     widthConstraint={"minimum": 140}, heightConstraint={"minimum": 60})
 
         relevant = singular_indices | set(hinge_indices) | set(theta_indices)
-        for idx in relevant:
+        ordered_relevant = sorted(relevant)
+
+        # Prune for visualization: keep top 3 neighbors per node, same idea as
+        # _render_main_graph. "Relevant" nodes are pre-selected as the most
+        # central/connected ones, so an unpruned graph would link nearly every
+        # pair, rendering as one illegible clump.
+        vis_edges: dict[tuple[int, int], float] = {}
+        for idx in ordered_relevant:
+            sims = [(other, graph.W[idx, other]) for other in ordered_relevant
+                    if other != idx and graph.W[idx, other] > 0]
+            sims.sort(key=lambda x: x[1], reverse=True)
+            for other, sim in sims[:3]:
+                key = (idx, other) if idx < other else (other, idx)
+                vis_edges[key] = max(vis_edges.get(key, 0.0), float(sim))
+
+        degrees = np.array([
+            sum(1 for (a, b) in vis_edges if a == idx or b == idx)
+            for idx in ordered_relevant
+        ])
+        sizes = dict(zip(ordered_relevant, _scale_node_sizes(degrees)))
+
+        for idx in ordered_relevant:
             p = graph.id_to_point[graph.ordered_ids[idx]]
             if idx in singular_indices: color = METHOD_COLORS["Singular"]
             elif idx in hinge_indices:  color = METHOD_COLORS["Hinge"]
@@ -301,17 +352,14 @@ class GraphExplorer:
             safe_text = html.escape(str(p.payload.get("text", "N/A")))
             title = (f"File: {safe_filename}\n"
                      f"Method: {', '.join(methods)}\n\n{safe_text}")
-            net.add_node(int(idx), label=str(idx), title=title, color=color, size=NODE_BASE_SIZE * 1.5)
+            net.add_node(int(idx), label=str(idx), title=title, color=color, size=sizes[idx])
 
-        for idx in relevant:
+        for idx in ordered_relevant:
             if graph.ordered_ids[idx] in initial_ids:
                 net.add_edge(prompt_node_id, int(idx))
-            for other in relevant:
-                if idx < other:
-                    sim = graph.W[idx, other]
-                    if sim > 0:
-                        net.add_edge(int(idx), int(other), value=float(sim))
-        net.set_options(json.dumps(_PHYSICS))
+        for (a, b), sim in vis_edges.items():
+            net.add_edge(int(a), int(b), value=sim)
+        net.set_options(json.dumps(_METHODS_PHYSICS))
         net.save_graph(path)
         _freeze_physics_after_stabilization(path)
         return path

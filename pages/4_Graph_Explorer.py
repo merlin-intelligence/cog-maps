@@ -87,6 +87,19 @@ if st.button("▶ generate graph", type="primary"):
                     ])
 
                     with tab_graph:
+                        if art.document_colors:
+                            swatches = "".join(
+                                f'<span style="display:inline-block;margin-right:0.9rem;">'
+                                f'<span style="display:inline-block;width:0.7rem;height:0.7rem;'
+                                f'border-radius:50%;background:{color};margin-right:0.35rem;"></span>'
+                                f'{html.escape(filename)}</span>'
+                                for filename, color in art.document_colors.items()
+                            )
+                            st.markdown(
+                                f'<div class="info-box"><strong style="color:#2a1f18">Files:</strong>&nbsp;'
+                                f'{swatches}</div>',
+                                unsafe_allow_html=True,
+                            )
                         with open(art.graph_html, "r", encoding="utf-8") as f:
                             st.components.v1.html(f.read(), height=900, scrolling=True)
 

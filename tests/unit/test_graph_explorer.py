@@ -1,15 +1,15 @@
 """Unit tests for cogmaps.graph.explorer._scale_node_sizes and
 _freeze_physics_after_stabilization.
 
-Regression 1: on a small or textually homogeneous corpus, the similarity
-graph is near-complete, so every node's degree — and with the old unbounded
-formula, its rendered size — was uniformly huge, making the graph
-unreadable ("les points sont beaucoup trop gros, on ne voit rien").
+_scale_node_sizes: on a small or textually homogeneous corpus, the
+similarity graph is near-complete, so every node's degree is uniformly
+high; sizes must stay clamped to a legible range regardless
+("les points sont beaucoup trop gros, on ne voit rien").
 
-Regression 2: vis-network keeps its force simulation running forever after
-the initial stabilization, so nodes visibly jitter continuously
-("les points vibrent"). pyvis's own stabilization handler only hides the
-loading bar — it never disables physics.
+_freeze_physics_after_stabilization: vis-network keeps its force simulation
+running forever after the initial stabilization, so nodes visibly jitter
+continuously ("les points vibrent"). pyvis's own stabilization handler only
+hides the loading bar — it never disables physics.
 """
 from __future__ import annotations
 

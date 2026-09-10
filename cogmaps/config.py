@@ -54,17 +54,30 @@ NEBIUS_MODELS = (
 )
 
 # ── Visualization ──
-PROMPT_NODE_COLOR = "#FF0000"
+# Matches the app's own light/cream theme (cogmaps/ui/styles.py's :root
+# palette) instead of pyvis's black-background default, so the graph tabs
+# don't look like a foreign embed inside an otherwise light UI.
+GRAPH_BG_COLOR = "#faf6f0"
+GRAPH_TEXT_COLOR = "#2a1f18"
+GRAPH_EDGE_COLOR = "#8a6a50"
+# Distinct from every METHOD_COLORS hue (esp. Singular's amber-brown, which
+# GRAPH_EDGE_COLOR's brown would be confused with) so edges never read as
+# "another node" of one of the three method categories.
+GRAPH_METHODS_EDGE_COLOR = "#a82020"
+GRAPH_PROMPT_TEXT_COLOR = "#fff8f4"
+PROMPT_NODE_COLOR = "#c44a28"
 NODE_BASE_SIZE = 10
 NODE_SIZE_MULTIPLIER = 3
 DOCUMENT_COLORS = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
 ]
+# Drawn from the app's brand palette (cogmaps/ui/styles.py), matching the
+# Singular/Hinge/Theta badge hues (.badge-singular/.badge-hinge/.badge-theta).
 METHOD_COLORS = {
-    "Singular": "#FFD700",
-    "Hinge":    "#32CD32",
-    "Theta":    "#1E90FF",
+    "Singular": "#9a6010",
+    "Hinge":    "#2e6b3a",
+    "Theta":    "#4a7fa8",
 }
 
 # ── Paths ──

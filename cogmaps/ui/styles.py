@@ -161,7 +161,7 @@ code, pre {
 }
 .badge-singular { background: #fdf0e0; color: #9a6010; border: 1px solid #c4901844; }
 .badge-hinge    { background: #e8f4ea; color: #2e6b3a; border: 1px solid #3d7a4a44; }
-.badge-theta    { background: #f5ede8; color: #8a3a1e; border: 1px solid #c44a2844; }
+.badge-theta    { background: #e8eff5; color: #4a7fa8; border: 1px solid #4a7fa844; }
 .badge-sim      { background: #f0ece8; color: #6a5040; border: 1px solid #8a6a5044; }
 
 .hero-tagline {

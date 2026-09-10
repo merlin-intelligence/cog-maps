@@ -41,7 +41,7 @@ if hasattr(PdfParser, "_get_line_spacing"):
 else:
     logger.warning(
         "chunknorris.PdfParser has no _get_line_spacing to patch — "
-        "the empty-linespace-counts fix is not applied; upgrade or pin chunknorris."
+        "PDF ingestion may crash on empty line-spacing input; upgrade or pin chunknorris."
     )
 
 

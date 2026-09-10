@@ -52,7 +52,7 @@ def verify_password(password: str, stored: str) -> bool:
             return hmac.compare_digest(dk.hex(), expected_hex)
         except (ValueError, TypeError):
             return False
-    # Legacy unsalted SHA-256 hash, from before the pbkdf2 migration.
+    # Unsalted SHA-256 hash format, still accepted for backward compatibility.
     legacy_hex = hashlib.sha256(password.encode()).hexdigest()
     return hmac.compare_digest(legacy_hex, stored)
 
@@ -235,9 +235,9 @@ def _all_usernames() -> list[str]:
     The current user is always included even when they're not in
     ``users.json`` — e.g. the "no users configured" open-access mode, where
     ``current_user()`` returns ``"guest"`` but ``"guest"`` is never a
-    registered user. Without this, ``_owning_user`` could never match that
-    user's own collections (no candidate would start with ``"guest_"``),
-    making their own private collections invisible to them.
+    registered user. This ensures ``_owning_user`` can match that user's own
+    collections (candidates starting with ``"guest_"``), keeping their
+    private collections visible to them.
     """
     try:
         db = load_user_db()

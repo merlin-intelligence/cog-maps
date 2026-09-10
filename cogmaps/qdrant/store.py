@@ -1,7 +1,6 @@
-"""``QdrantStore`` — single class wrapping all Qdrant operations.
-
-Consolidates what previously lived in three files (client, ingestion, retrieval)
-so callers don't have to thread a ``QdrantClient`` through every helper.
+"""``QdrantStore`` — single class wrapping all Qdrant operations
+(connection, ingestion, retrieval) so callers don't have to thread a
+``QdrantClient`` through every helper.
 """
 from __future__ import annotations
 
@@ -74,10 +73,11 @@ class QdrantStore:
             host=self.host, port=self.port, timeout=timeout, api_key=qdrant_api_key(),
             # qdrant-client defaults `https=True` as soon as an api_key is set
             # (see qdrant_remote.py: `https = api_key is not None` when unset).
-            # Our docker-compose.yml runs plain HTTP (API key, not TLS, protects
-            # the localhost-bound port) — without this, every request attempts
-            # a TLS handshake against a plain-HTTP server and fails with
-            # "SSL: WRONG_VERSION_NUMBER".
+            # Our docker-compose.yml runs plain HTTP (the API key is
+            # defense-in-depth, not TLS, on the localhost-bound port); an
+            # explicit `https=False` keeps requests from attempting a TLS
+            # handshake against a plain-HTTP server (which would fail with
+            # "SSL: WRONG_VERSION_NUMBER").
             https=False,
         )
 

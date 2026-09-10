@@ -139,9 +139,9 @@ with open('user_data/users.json', 'w') as f:
 "
 ```
 
-> **Migration from v1**: if your `users.json` is a flat `{"user": "hash"}` (format used before the public collections feature), the app migrates it automatically in memory on the first read. The file on disk is rewritten to v2 format the next time any user changes their password. You can also convert it manually by wrapping it in `{"admins": [], "users": {...}}`.
+> **Migration from v1**: if your `users.json` is a flat `{"user": "hash"}` format, the app migrates it automatically in memory on the first read. The file on disk is rewritten to v2 format the next time any user changes their password. You can also convert it manually by wrapping it in `{"admins": [], "users": {...}}`.
 >
-> **Legacy unsalted SHA-256 hashes**: password hashing moved to salted PBKDF2 (`pbkdf2$<iterations>$<salt>$<hash>`). Hashes created before this change (plain `sha256(password).hexdigest()`) still verify correctly and are transparently upgraded to the new format the next time that user logs in successfully — no manual migration needed.
+> **Legacy unsalted SHA-256 hashes**: password hashing uses salted PBKDF2 (`pbkdf2$<iterations>$<salt>$<hash>`). Plain `sha256(password).hexdigest()` hashes still verify correctly and are transparently upgraded to the new format the next time that user logs in successfully — no manual migration needed.
 
 ### Rate limiting and sessions
 
