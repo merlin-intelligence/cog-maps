@@ -1,5 +1,6 @@
-"""Unit tests for cogmaps.core.corpus_analysis: stats, and the two analyses that
-were previously all-or-nothing on missing embeddings (topic_model, similar_pairs).
+"""Unit tests for cogmaps.core.corpus_analysis: stats, and the two analyses
+(topic_model, similar_pairs) that must gracefully exclude documents missing
+an embedding rather than failing on the whole corpus.
 """
 from __future__ import annotations
 
@@ -62,7 +63,6 @@ def test_similar_pairs_excludes_docs_without_a_vector_instead_of_disabling_every
         _doc("c", vector=_unit_vec(1.0, 0.0)),
     ]
     pairs = similar_pairs(docs, threshold=0.99)
-    # Previously: any doc missing a vector made the whole corpus return [].
     assert len(pairs) == 1
     assert {pairs[0].a, pairs[0].b} == {"a", "c"}
 
@@ -74,8 +74,7 @@ def test_similar_pairs_threshold_zero_or_negative_has_no_false_positive_self_pai
     ]
     pairs = similar_pairs(docs, threshold=-1.0)
     # Exactly the one i<j pair, never a self-pair or a duplicate from the
-    # lower triangle (a regression the un-vectorized loop was immune to but a
-    # naive `np.triu(...) >= threshold` rewrite would not be).
+    # lower triangle.
     assert len(pairs) == 1
     assert {pairs[0].a, pairs[0].b} == {"a", "b"}
 
@@ -109,10 +108,9 @@ def test_topic_model_returns_none_below_k_min_usable_docs():
 
 
 def test_topic_model_returns_none_with_exactly_k_min_usable_docs_no_crash():
-    """Regression: with exactly k_min (2) usable docs, n_clusters would equal
-    n_samples, which is outside sklearn's silhouette_score domain (2 <=
-    n_labels <= n_samples - 1) and used to raise an uncaught ValueError instead
-    of returning None."""
+    """With exactly k_min (2) usable docs, n_clusters would equal n_samples,
+    which is outside sklearn's silhouette_score domain (2 <= n_labels <=
+    n_samples - 1); topic_model must return None instead of raising."""
     docs = [
         _doc("a", vector=_unit_vec(1.0, 0.0)),
         _doc("b", vector=_unit_vec(0.0, 1.0)),

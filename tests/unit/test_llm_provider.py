@@ -63,12 +63,13 @@ def test_ollama_models_empty(monkeypatch):
 
 # ── config._int_env / qdrant_port / max_analysis_documents ──
 #
-# Regression: `.env.example` ships several int-typed vars as bare
-# `NAME=` placeholders (e.g. MAX_ANALYSIS_DOCUMENTS=) for the user to fill
-# in — copied as-is into `.env`, the var is *set* to an empty string, not
-# absent. `int(os.getenv(name, default))` only falls back to `default` when
-# the var is missing entirely, so an empty-but-present var used to crash the
-# page with `ValueError: invalid literal for int() with base 10: ''`.
+# `.env.example` ships several int-typed vars as bare `NAME=` placeholders
+# (e.g. MAX_ANALYSIS_DOCUMENTS=) for the user to fill in — copied as-is into
+# `.env`, the var is *set* to an empty string, not absent.
+# `int(os.getenv(name, default))` only falls back to `default` when the var
+# is missing entirely, so these tests verify an empty-but-present var still
+# falls back cleanly instead of raising `ValueError: invalid literal for
+# int() with base 10: ''`.
 
 def test_qdrant_port_falls_back_to_default_when_unset(monkeypatch):
     monkeypatch.delenv("QDRANT_PORT", raising=False)

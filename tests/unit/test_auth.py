@@ -2,9 +2,8 @@
 and the per-user collection ownership resolution.
 
 These exercise the module's logic directly rather than the login form's rendering
-(which needs a real Streamlit script run) — the audit that motivated these tests
-flagged exactly this logic (fail-open auth, weak hashing, prefix-collision
-ownership) as both critical and previously untested.
+(which needs a real Streamlit script run) — this logic (fail-open auth, weak
+hashing, prefix-collision ownership) is security-critical.
 """
 from __future__ import annotations
 
@@ -125,7 +124,7 @@ def test_clear_failed_logins_resets_lockout():
     assert auth._is_rate_limited("alice") == 0.0
 
 
-# ── collection ownership: the bob / bob_admin prefix-collision fix ──────
+# ── collection ownership: bob / bob_admin prefix collision ──────────────
 
 def test_owning_user_resolves_prefix_collision_to_longest_match():
     usernames = ["bob", "bob_admin", "alice"]
@@ -154,10 +153,10 @@ def test_list_visible_collections_excludes_other_users_and_includes_public():
 
 
 def test_guest_mode_no_users_configured_can_see_own_collections():
-    """Regression: with no users configured (open-access mode), current_user()
-    returns "guest", which is never a registered user. _owning_user must still
-    resolve "guest_..." collections to "guest" — otherwise a user's own
-    collections become invisible to them right after ingesting."""
+    """With no users configured (open-access mode), current_user() returns
+    "guest", which is never a registered user. _owning_user must still
+    resolve "guest_..." collections to "guest", or a user's own collections
+    become invisible to them right after ingesting."""
     auth.save_user_db({"admins": [], "users": {}})
     # No "authenticated_user" set in session_state -> current_user() falls
     # back to "guest", exactly like the real no-auth code path.

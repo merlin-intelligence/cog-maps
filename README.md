@@ -11,7 +11,7 @@ CogMaps is a sophisticated knowledge management and exploration application buil
    - Local directories (PDF, Word, Excel, CSV, PowerPoint, Text, Markdown) with OCR support — each format is parsed to markdown (PDF/DOCX/XLSX/CSV via ChunkNorris, PowerPoint via MarkItDown) and chunked uniformly by ChunkNorris. JSON is not supported yet.
    - Direct synchronization with Google Drive (OAuth or Service Account).
    - Direct synchronization with Microsoft SharePoint.
-   - **Browser-resilient async ingestion**: jobs run in a background daemon thread decoupled from the browser session. Tab closure, network interruption, or browser timeout no longer kills the process. Job state (status, progress, logs) is persisted to SQLite (`user_data/jobs.db`) and the UI reconnects automatically to a running job on page reload.
+   - **Browser-resilient async ingestion**: jobs run in a background daemon thread decoupled from the browser session, so tab closure, network interruption, or browser timeout does not kill the process. Job state (status, progress, logs) is persisted to SQLite (`user_data/jobs.db`) and the UI reconnects automatically to a running job on page reload.
    - **Smart Resume**: File-level resume feature using Qdrant filename tracking to skip already processed documents.
    - Local multilingual embedding (`intfloat/multilingual-e5-base`, 768-dim) via `sentence-transformers`, with the E5 `query:` / `passage:` prefixes applied automatically.
 

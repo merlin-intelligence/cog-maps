@@ -175,9 +175,9 @@ def _submit_job(dirs_content: bytes) -> str:
 def _safe_upload_filename(name: str) -> str:
     """Reduce a client-supplied filename to a bare basename with no path components.
 
-    ``uf.name`` comes straight from the multipart upload and is not trustworthy —
-    without this, a crafted name like ``../../../etc/cron.d/x`` would let an
-    uploader write files outside ``upload_dir``.
+    ``uf.name`` comes straight from the multipart upload and is not trustworthy;
+    this guards against a crafted name like ``../../../etc/cron.d/x`` being used
+    to write files outside ``upload_dir``.
     """
     name = os.path.basename((name or "").replace("\\", "/")).strip()
     if not name or set(name) <= {"."}:

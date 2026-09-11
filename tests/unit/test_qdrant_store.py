@@ -14,13 +14,13 @@ from cogmaps.qdrant.store import QdrantStore, date_range_filter, make_point
 
 # ── https=False must always be passed alongside api_key ──────────────────
 #
-# Regression test: qdrant-client defaults `https=True` as soon as `api_key`
-# is set (see qdrant_remote.py: `self._https = https if https is not None
-# else api_key is not None`). Our docker-compose.yml runs plain HTTP on
-# localhost (the API key is defense-in-depth, not TLS) — omitting an explicit
-# `https=False` alongside `api_key=...` makes every request attempt a TLS
-# handshake against a plain-HTTP server and fail with
-# "SSL: WRONG_VERSION_NUMBER" the moment QDRANT_API_KEY is set.
+# qdrant-client defaults `https=True` as soon as `api_key` is set (see
+# qdrant_remote.py: `self._https = https if https is not None else
+# api_key is not None`). Our docker-compose.yml runs plain HTTP on
+# localhost (the API key is defense-in-depth, not TLS), so an explicit
+# `https=False` alongside `api_key=...` is required — otherwise every
+# request attempts a TLS handshake against a plain-HTTP server and fails
+# with "SSL: WRONG_VERSION_NUMBER".
 
 def test_init_passes_https_false_alongside_api_key(monkeypatch):
     captured = {}
