@@ -15,5 +15,18 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  oxigraph:
+    image: ghcr.io/oxigraph/oxigraph:latest
+    container_name: eigenmind_oxigraph
+    restart: always
+    command: serve --location /data --bind 0.0.0.0:7878
+    # Bind to localhost only, same reasoning as Qdrant above — Oxigraph has
+    # no auth of its own and the app expects to reach it locally.
+    ports:
+      - "127.0.0.1:7878:7878"
+    volumes:
+      - oxigraph_storage:/data
+
 volumes:
   qdrant_storage:
+  oxigraph_storage:

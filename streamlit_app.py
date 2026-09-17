@@ -26,6 +26,8 @@ def home_page():
           <li><strong>/analyze corpus/</strong> — inventory, topics and similarities across your corpus.</li>
           <li><strong>/ask/</strong> — ask questions over your corpus with hybrid graph + similarity retrieval.</li>
           <li><strong>/explore graphs/</strong> — visualize the knowledge graph around a prompt.</li>
+          <li><strong>/explore ontology/</strong> — browse ontologies in Oxigraph, run SPARQL queries.</li>
+          <li><strong>/build ontology/</strong> — construct an OWL/RDFS ontology from selected documents.</li>
           <li><strong>/manage/</strong> — list and delete embedded documents by date.</li>
         </ul>
     </div>
@@ -51,7 +53,9 @@ pg = st.navigation([
     st.Page("pages/2_Corpus_Analysis.py", title="/analyze corpus/", icon="📊"),
     st.Page("pages/3_Chat.py", title="/ask/", icon="💬"),
     st.Page("pages/4_Graph_Explorer.py", title="/explore graphs/", icon="🕸️"),
-    st.Page("pages/5_Manage.py", title="/manage/", icon="⚙️"),
+    st.Page("pages/5_Ontology_Explorer.py", title="/explore ontology/", icon="🔎"),
+    st.Page("pages/6_Ontology_Building.py", title="/build ontology/", icon="🧬"),
+    st.Page("pages/7_Manage.py", title="/manage/", icon="⚙️"),
 ])
 
 pg.run()

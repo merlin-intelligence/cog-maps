@@ -173,12 +173,98 @@ When **Ollama** is selected, the model dropdown is populated automatically from 
 docker-compose up -d
 ```
 
-This will download the Qdrant image and start the database in the background. Vectors are stored persistently in the named Docker volume `qdrant_storage` (declared in `docker-compose.yml`) — not a plain folder in the repo. To back it up:
+This starts both `qdrant` and `oxigraph` (the RDF triplestore behind `/build ontology/`, see below) in the background. Vectors are stored persistently in the named Docker volume `qdrant_storage` (declared in `docker-compose.yml`) — not a plain folder in the repo. To back it up:
 
 ```bash
 docker run --rm -v qdrant_storage:/data:ro -v "$(pwd)":/backup \
   alpine tar czf /backup/qdrant_storage_$(date +%F).tar.gz -C /data .
 ```
+
+### Ontology Building (`/build ontology/`) — Oxigraph + OLAF
+
+This page builds an OWL/RDFS ontology from a corpus already in Qdrant, using
+[OLAF](https://github.com/merlin-intelligence/olaf) (an MCP server exposing
+ontology-CRUD tools) driven by a tool-calling LLM agent.
+
+- **Oxigraph** — the RDF triplestore that stores the ontology triples. Runs
+  as the `oxigraph` service in `docker-compose.yml` (started by `docker-compose up -d`
+  above), bound to `127.0.0.1:7878`. Override its URL with `OXIGRAPH_URL` in `.env`.
+- **OLAF** — installed as a regular Python dependency (`pip install -e .`
+  pulls it from `git+https://github.com/merlin-intelligence/olaf.git`). There
+  is no standalone OLAF server to run: `cogmaps.ontology.runner.OntologyJobRunner`
+  spawns a fresh `olaf` **stdio subprocess per build job**, with a `config.toml`
+  generated on the fly (Qdrant collection, field mapping, Oxigraph URL,
+  ontology id derived from the collection name).
+- **Qdrant authentication** — CogMaps' Qdrant requires `QDRANT_API_KEY`
+  (Step 3), which [OLAF](https://github.com/merlin-intelligence/olaf)
+  supports via `[qdrant].api_key` in `config.toml` (or the `QDRANT_API_KEY`
+  env var directly) — `cogmaps.ontology.olaf_config` writes it into the
+  generated `config.toml` for every job/cleanup subprocess.
+- **`mcp` version pin** — OLAF's `server.py` uses the pre-2.0 low-level
+  `Server` API (`@server.list_tools()`/`@server.call_tool()` decorators,
+  removed in `mcp` 2.0). OLAF's own `pyproject.toml` only requires
+  `mcp>=1.0.0` with no upper bound, so an unpinned install can resolve an
+  incompatible `mcp` 2.x and crash with
+  `AttributeError: 'Server' object has no attribute 'list_tools'`. CogMaps
+  pins `mcp<2.0.0` in its own `pyproject.toml`/`requirements.txt` as a
+  workaround — the real fix belongs in OLAF's own dependency pin.
+- **Updating OLAF** — since it's a git dependency, `pip install -e .` alone
+  won't pick up new commits once already installed. Force it:
+  ```bash
+  pip install --upgrade --force-reinstall --no-deps \
+    "olaf @ git+https://github.com/merlin-intelligence/olaf.git"
+  ```
+  `--no-deps` avoids pip re-resolving `mcp` back to an incompatible version.
+- **Model** — the agent loop calls Nebius through `litellm`'s generic
+  OpenAI-compatible-endpoint support (`model="openai/<name>"` + explicit
+  `api_base`/`api_key`), so `NEBIUS_API_KEY` (Step 3) is required. Choices
+  are `ONTOLOGY_TOOLCALL_MODELS` in `cogmaps/config.py` — Nebius's catalog
+  changes over time, so a model that used to work can start failing with a
+  403 (no access) or 404 (renamed/removed). Verify what's actually available
+  before changing the list:
+  ```bash
+  curl -s https://api.studio.nebius.ai/v1/models \
+    -H "Authorization: Bearer $NEBIUS_API_KEY" | jq -r '.data[].id'
+  ```
+  Ollama is not supported for this page (no function-calling wiring for it
+  today).
+- **Provenance** — `concept_create`/`individual_create` can record which
+  chunk a concept came from (`source_chunk_id` → an
+  `<uri> <urn:olaf:extractedFrom> <urn:olaf:chunk:{id}>` triple), surfaced in
+  the graph view's node tooltips (`cogmaps.ontology.graph`). Known upstream
+  gaps as of this writing: that link is only ever written at *first*
+  creation (calling `concept_create` again on an existing URI — the
+  dedup/reuse path — is a no-op, so a chunk that merely confirms an existing
+  concept never gets recorded as an additional source), and `property_create`
+  / `relation_add` have no provenance parameter at all.
+
+### Ontology Explorer (`/explore ontology/`)
+
+A read-only browser over whatever's already in Oxigraph — no OLAF/agent
+involved. `cogmaps.ontology.oxigraph_client` talks straight to Oxigraph's
+SPARQL 1.1 HTTP `/query` endpoint (never `/update`): lists every named graph
+(each built ontology is `urn:olaf:{ontology_id}`, seeds are
+`urn:olaf:seed:{id}`), renders the selected one as a navigable graph (reusing
+`cogmaps.ontology.graph.build_pyvis_html`, physics-tuning panel hidden here
+unlike the Building page) plus its raw Turtle, and exposes a free-text SPARQL
+field (SELECT/ASK/CONSTRUCT/DESCRIBE) for ad-hoc queries.
+
+### Ontology cleanup (`/manage/`)
+
+`cogmaps.ontology.cleanup` adds three danger-zone actions to the Manage page,
+each running OLAF's own CLI drop commands as a short-lived subprocess (same
+config-generation approach as a build job):
+
+- **Delete entire collection** cascades to delete that collection's ontology
+  too (Oxigraph graph via `olaf drop <id>`, its `olaf_concepts_{id}` Qdrant
+  collection, and the cached `.ttl` export) — a warning is shown before
+  confirming. **This never goes the other way**: deleting an ontology alone
+  never touches the Qdrant collection it was built from.
+- **Delete ontology only** — the same cleanup, without touching the
+  collection.
+- **Delete seed ontologies** (admin-only) — seeds are global, shared across
+  every ontology in the store, so this section is independent of the
+  collection selected above. Runs `olaf drop-seed <id>`.
 
 ## Performance & Stability Optimizations
 
@@ -234,7 +320,9 @@ Navigate between pages from the Streamlit sidebar:
 | `pages/2_Corpus_Analysis.py`| `/analyze corpus/` - Inventory, sizes, wordcloud, embedding-based topic clustering (TF-IDF labels), pairwise semantic similarity |
 | `pages/3_Chat.py`           | `/ask/` - Hybrid RAG question answering against a selected collection |
 | `pages/4_Graph_Explorer.py` | `/explore graphs/` - Subgraph view (Singular / Hinge / Theta nodes) |
-| `pages/5_Manage.py`         | `/manage/` - List & delete documents per ingestion date |
+| `pages/5_Ontology_Explorer.py` | `/explore ontology/` - Browse ontologies stored in Oxigraph graphically, run read-only SPARQL queries |
+| `pages/6_Ontology_Building.py` | `/build ontology/` - Construct an OWL/RDFS ontology from selected documents via OLAF + Oxigraph |
+| `pages/7_Manage.py`         | `/manage/` - List & delete documents per ingestion date; delete collections/ontologies/seeds |
 
 ### Collection visibility
 
