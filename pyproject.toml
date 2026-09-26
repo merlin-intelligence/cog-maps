@@ -31,6 +31,14 @@ dependencies = [
     "scikit-learn",
     "wordcloud",
     "eigenmind==0.1.1",
+    # OLAF's server.py uses the pre-2.0 low-level Server API
+    # (@server.list_tools()/@server.call_tool() decorators, removed in mcp 2.0)
+    # — capped here since OLAF's own "mcp>=1.0.0" has no upper bound and lets
+    # pip resolve an incompatible 2.x otherwise.
+    "mcp<2.0.0",
+    "olaf @ git+https://github.com/merlin-intelligence/olaf.git",
+    "litellm",
+    "rdflib",
 ]
 
 [project.optional-dependencies]

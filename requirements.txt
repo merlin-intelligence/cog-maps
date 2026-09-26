@@ -24,6 +24,11 @@ scikit-learn
 wordcloud
 python-dotenv
 eigenmind==0.1.1
+# OLAF's server.py uses the pre-2.0 low-level Server API (removed in mcp 2.0) — see pyproject.toml
+mcp<2.0.0
+olaf @ git+https://github.com/merlin-intelligence/olaf.git
+litellm
+rdflib
 
 # ── Optional: Google Drive connector (pyproject extra: gdrive) ──
 google-api-python-client

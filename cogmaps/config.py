@@ -47,11 +47,27 @@ MAX_CONTEXT_CHARS = 60_000
 # local Ollama server. The provider is selected with the LLM_PROVIDER env var.
 DEFAULT_LLM_PROVIDER = "nebius"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+# 2026-09-17: verified against this account's actual catalog (GET /v1/models
+# on both api.studio.nebius.ai and api.tokenfactory.nebius.com — same list on
+# both) after "meta-llama/Llama-3.3-70B-Instruct" (403, no access) and
+# "moonshotai/Kimi-K2.5-fast" (404, renamed) started failing. Nebius's catalog
+# changes over time — re-verify the same way if a model here starts failing.
 NEBIUS_MODELS = (
-    "meta-llama/Llama-3.3-70B-Instruct",
-    "moonshotai/Kimi-K2.5-fast",
+    "moonshotai/Kimi-K2.6",
     "openai/gpt-oss-120b",
+    "deepseek-ai/DeepSeek-V4-Pro",
 )
+
+# ── Ontology-building page (/build ontology/) ──
+# Models offered for the OLAF tool-calling agent loop. Restricted to Nebius —
+# no function-calling wiring exists for the local Ollama backend today.
+# A distinct (not aliased) tuple from NEBIUS_MODELS: tool-calling capability
+# matters here specifically, general chat quality doesn't need the same bar.
+ONTOLOGY_TOOLCALL_MODELS = (
+    "openai/gpt-oss-120b",
+    "moonshotai/Kimi-K2.6",
+)
+DEFAULT_OXIGRAPH_URL = "http://localhost:7878"
 
 # ── Visualization ──
 # Matches the app's own light/cream theme (cogmaps/ui/styles.py's :root
@@ -119,6 +135,11 @@ def qdrant_port() -> int:
 def qdrant_api_key() -> str | None:
     """Qdrant API key from env, or None if the instance has no auth configured."""
     return os.getenv("QDRANT_API_KEY", "").strip() or None
+
+
+def oxigraph_url() -> str:
+    """Base URL of the Oxigraph RDF triplestore backing /build ontology/."""
+    return os.getenv("OXIGRAPH_URL", "").strip() or DEFAULT_OXIGRAPH_URL
 
 
 def max_analysis_documents() -> int:

@@ -15,6 +15,19 @@ logger = logging.getLogger(__name__)
 _TOKENFACTORY_ORGS = frozenset({"moonshotai", "openai"})
 
 
+def resolve_nebius_endpoint(model: str) -> tuple[str, str]:
+    """Pick the Nebius Chat Completions URL for ``model`` (TokenFactory for Kimi/GPT-OSS, Studio for the rest).
+
+    Returns ``(api_url, vendor)``. Shared by :class:`NebiusClient` and the
+    ontology-building agent (:mod:`cogmaps.ontology.agent`), which calls
+    Nebius through ``litellm`` instead of this module's ``chat()``.
+    """
+    org = model.split("/", 1)[0]
+    if org in _TOKENFACTORY_ORGS:
+        return "https://api.tokenfactory.nebius.com/v1/chat/completions", "AI Hub"
+    return "https://api.studio.nebius.ai/v1/chat/completions", "AI Hub Studio"
+
+
 class NebiusClient:
     """Client for the Nebius / AI Hub Chat Completions endpoints.
 
@@ -25,15 +38,8 @@ class NebiusClient:
     def __init__(self, model: str, api_key: str):
         self.model = model
         self.api_key = api_key
-        org = model.split("/", 1)[0]
-        if org in _TOKENFACTORY_ORGS:
-            self.api_url = "https://api.tokenfactory.nebius.com/v1/chat/completions"
-            self.vendor = "AI Hub"
-            self._user_content_is_blocks = True
-        else:
-            self.api_url = "https://api.studio.nebius.ai/v1/chat/completions"
-            self.vendor = "AI Hub Studio"
-            self._user_content_is_blocks = False
+        self.api_url, self.vendor = resolve_nebius_endpoint(model)
+        self._user_content_is_blocks = self.vendor == "AI Hub"
         logger.debug("NebiusClient: vendor=%s model=%s", self.vendor, self.model)
 
     def chat(self, system_prompt: str, user_content: str) -> str:
