@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # exactly (rather than a substring search over the whole model name) avoids
 # accidental matches if a future model name happens to contain "openai"
 # elsewhere in it.
-_TOKENFACTORY_ORGS = frozenset({"moonshotai", "openai"})
+_TOKENFACTORY_ORGS = frozenset({"moonshotai", "openai", "zai-org"})
 
 
 def resolve_nebius_endpoint(model: str) -> tuple[str, str]:

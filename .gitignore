@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Runtime and local cache directories
+user_data/
+temp_graph_outputs/
+downloaded_corpus
+
+# Analysis and research documentation created during development
+docs/CHANGES_LAST_3_DAYS.md
+docs/domain_discovery.md
+docs/ontology_build_llm_cost_analysis.md
+docs/ontology_code_prompt_relevance_across_domains.md
+

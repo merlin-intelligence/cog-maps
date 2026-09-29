@@ -22,6 +22,7 @@ def _isolated_user_db(tmp_path, monkeypatch):
     db_path = tmp_path / "users.json"
     monkeypatch.setattr(auth, "USER_DB_PATH", str(db_path))
     monkeypatch.setattr(st, "session_state", {})
+    monkeypatch.setattr(st, "secrets", {})
     auth._failed_logins.clear()
     yield db_path
 

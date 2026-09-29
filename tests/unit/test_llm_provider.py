@@ -142,6 +142,11 @@ def test_nebius_client_routes_other_orgs_to_studio():
     assert client.api_url == "https://api.studio.nebius.ai/v1/chat/completions"
 
 
+def test_nebius_client_routes_zai_org_to_tokenfactory():
+    client = NebiusClient(model="zai-org/GLM-5.3", api_key="k")
+    assert client.api_url == "https://api.tokenfactory.nebius.com/v1/chat/completions"
+
+
 def test_nebius_client_org_match_is_exact_not_substring():
     # An org name that merely *contains* "openai" must not be misrouted —
     # only an exact "openai" org (before the first "/") should match.

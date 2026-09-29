@@ -44,6 +44,27 @@ def ttl_path_for(collection: str) -> str:
     return str(USER_DATA_DIR / "ontology" / f"{collection}.ttl")
 
 
+def export_oxigraph_ontology_ttl(ontology_id: str, oxigraph_url: str | None = None) -> str | None:
+    """Fetch the Turtle representation of an ontology's named graph directly from Oxigraph.
+
+    Bypasses seed graphs and guarantees returning the current state in the graph store.
+    """
+    import urllib.request
+    from cogmaps.config import oxigraph_url as default_oxigraph_url
+
+    endpoint = (oxigraph_url or default_oxigraph_url()).rstrip("/")
+    url = f"{endpoint}/store?graph=urn:olaf:{ontology_id}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "text/turtle"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = resp.read().decode("utf-8")
+            if data and data.strip():
+                return data
+    except Exception:
+        pass
+    return None
+
+
 def build_config_toml(
     *,
     qdrant_url: str,
@@ -86,6 +107,6 @@ name        = "{ontology_name}"
 ontology_id = "{ontology_id}"
 
 [embedding]
-model   = "intfloat/multilingual-e5-small"
+model   = "intfloat/multilingual-e5-base"
 enabled = true
 '''

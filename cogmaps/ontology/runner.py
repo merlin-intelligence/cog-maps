@@ -16,11 +16,13 @@ import tempfile
 import threading
 import traceback
 
-from cogmaps.config import nebius_api_key, oxigraph_url, qdrant_api_key
+from cogmaps.config import domain_discovery_model, nebius_api_key, oxigraph_url, qdrant_api_key
 from cogmaps.ontology.agent import run_build
+from cogmaps.ontology.domain_discovery import discover_domain, load_blueprint
 from cogmaps.ontology.mcp_client import olaf_session
-from cogmaps.ontology.olaf_config import build_config_toml, ttl_path_for
+from cogmaps.ontology.olaf_config import build_config_toml, export_oxigraph_ontology_ttl, ttl_path_for
 from cogmaps.ontology.store import OntologyJobStore
+from cogmaps.qdrant.store import QdrantStore
 from cogmaps.rag.llm_clients import resolve_nebius_endpoint
 
 __all__ = ["OntologyJobRunner", "ttl_path_for"]
@@ -94,6 +96,24 @@ class OntologyJobRunner:
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(turtle)
 
+            # ── Phase 0: Automated Domain Discovery ──
+            store = QdrantStore(self.qdrant_host, self.qdrant_port)
+            log(f"Phase 0: Resolving domain blueprint for collection {collection!r}...")
+            blueprint = load_blueprint(collection)
+            if blueprint is None:
+                log("Phase 0: No cached domain blueprint found. Launching automated Domain Discovery (GLM-5.3-Flash)...")
+                try:
+                    blueprint = discover_domain(store, collection, model=domain_discovery_model())
+                    log(
+                        f"Phase 0: Domain discovery completed -> '{blueprint.inferred_domain}' "
+                        f"({blueprint.epistemological_nature}) with {len(blueprint.pillars)} taxonomical pillars."
+                    )
+                except Exception as e:
+                    log(f"Phase 0 warning: Domain discovery failed ({e}), proceeding with default prompt.")
+                    blueprint = None
+            else:
+                log(f"Phase 0: Loaded cached domain profile -> '{blueprint.inferred_domain}' ({len(blueprint.pillars)} pillars).")
+
             log(f"Starting OLAF (collection={collection!r}, ontology_id={job['ontology_id']!r})")
             async with olaf_session(config_dir) as session:
                 await run_build(
@@ -105,7 +125,23 @@ class OntologyJobRunner:
                     log=log,
                     set_progress=set_progress,
                     export_cb=export_cb,
+                    blueprint=blueprint,
                 )
+                # Guaranteed final export of the active ontology from Oxigraph (excluding global seeds)
+                try:
+                    res = await session.call_tool("ontology_export", {"include_seeds": False})
+                    content = res.content[0].text if res.content else ""
+                    if content and ("owl:Class" in content or "a <http://www.w3.org/2002/07/owl#Class>" in content or "<http://olaf.local/ontology" in content):
+                        export_cb(content)
+                        log("Final ontology exported successfully.")
+                    else:
+                        raise ValueError("Session export returned empty or incomplete content")
+                except Exception as ex:
+                    log(f"Final session export fallback: querying Oxigraph directly ({ex})...")
+                    direct_ttl = export_oxigraph_ontology_ttl(job["ontology_id"], oxigraph_url())
+                    if direct_ttl:
+                        export_cb(direct_ttl)
+                        log("Final ontology exported via direct Oxigraph connection.")
             self.store.set_status(job_id, "done")
             log("Ontology build complete.")
         except Exception as e:  # noqa: BLE001

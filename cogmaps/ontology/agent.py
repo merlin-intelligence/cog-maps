@@ -17,14 +17,17 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import litellm
 from mcp import ClientSession
 
-from cogmaps.ontology.prompts import SYSTEM_PROMPT
+from cogmaps.ontology.prompts import SYSTEM_PROMPT, build_system_prompt
 
-MAX_ITERATIONS = 50
+if TYPE_CHECKING:
+    from cogmaps.ontology.domain_discovery import DomainBlueprint
+
+MAX_ITERATIONS = 150
 
 
 def mcp_tools_to_litellm(mcp_tools: list) -> list[dict]:
@@ -73,6 +76,8 @@ async def run_build(
     set_progress: Callable[[int, int], None],
     export_cb: Callable[[str], None],
     max_iterations: int = MAX_ITERATIONS,
+    blueprint: DomainBlueprint | None = None,
+    system_prompt: str | None = None,
 ) -> None:
     """Run the tool-calling loop against an already-initialized OLAF session.
 
@@ -85,8 +90,14 @@ async def run_build(
     tools = mcp_tools_to_litellm(tools_result.tools)
     log(f"Loaded {len(tools)} OLAF tools.")
 
+    active_prompt = system_prompt or (build_system_prompt(blueprint) if blueprint else SYSTEM_PROMPT)
+    if blueprint:
+        log(f"Configured agent with dynamic domain blueprint: '{blueprint.inferred_domain}' ({len(blueprint.pillars)} pillars)")
+    else:
+        log("Configured agent with default domain prompt.")
+
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": active_prompt},
         {"role": "user", "content": _build_user_message(doc_filenames)},
     ]
 
@@ -112,6 +123,20 @@ async def run_build(
         msg = response.choices[0].message
 
         if not msg.tool_calls:
+            exported = any(m.get("tool_call_id") and m.get("name") == "ontology_export" for m in messages)
+            if not exported and iteration < max_iterations:
+                if msg.content:
+                    log(f"Agent interim note: {msg.content[:200]}")
+                messages.append({"role": "assistant", "content": msg.content or ""})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Do not stop yet. Continue processing all remaining document chunks across the selected documents. "
+                        "Call chunk_list (using offset or next doc_id) and chunk_read_batch to read chunks in batches, "
+                        "extract concepts, properties, and relations, mark chunks processed, and call ontology_export when all chunks are covered."
+                    ),
+                })
+                continue
             log("Agent finished — model returned no further tool calls.")
             if msg.content:
                 log(f"Final message: {msg.content}")
@@ -150,8 +175,12 @@ async def run_build(
             log(f"  -> {content[:200]}")
 
             if tool_name == "ontology_export" and content:
-                export_cb(content)
-                log("Ontology exported.")
+                # Avoid overwriting the persisted file with global seeds or empty models during early exploration
+                if iteration > 2 and ("owl:Class" in content or "a <http://www.w3.org/2002/07/owl#Class>" in content):
+                    export_cb(content)
+                    log("Ontology exported.")
+                else:
+                    log("Intermediate ontology export received (skipped persisting seed-only or pre-build graph).")
 
             messages.append({
                 "role": "tool",

@@ -10,7 +10,7 @@ import html
 import json
 
 from pyvis.network import Network
-from rdflib import OWL, RDF, RDFS, BNode, Graph, URIRef
+from rdflib import OWL, RDF, RDFS, SKOS, BNode, Graph, URIRef
 
 from cogmaps.config import GRAPH_BG_COLOR, GRAPH_EDGE_COLOR, GRAPH_TEXT_COLOR, METHOD_COLORS
 
@@ -24,6 +24,7 @@ INDIVIDUAL_COLOR = METHOD_COLORS["Hinge"]
 # URI (dedup/reuse) — only whatever this triple already holds is surfaced here.
 _EXTRACTED_FROM = URIRef("urn:olaf:extractedFrom")
 _CHUNK_URI_PREFIX = "urn:olaf:chunk:"
+_RDFS_ALT_LABEL = URIRef("http://www.w3.org/2000/01/rdf-schema#altLabel")
 
 
 def _chunk_id_from_uri(uri: URIRef) -> str:
@@ -118,15 +119,38 @@ def build_pyvis_html(ttl: str, output_path: str, *, show_physics_controls: bool 
     individuals = set(g.subjects(RDF.type, OWL.NamedIndividual))
     object_properties = set(g.subjects(RDF.type, OWL.ObjectProperty))
     datatype_properties = set(g.subjects(RDF.type, OWL.DatatypeProperty))
+
+    # Include external or seed classes referenced in subClassOf
+    for s, o in g.subject_objects(RDFS.subClassOf):
+        if isinstance(s, URIRef):
+            classes.add(s)
+        if isinstance(o, URIRef):
+            classes.add(o)
+
+    # Include classes referenced in domain/range of object properties
+    for prop in object_properties:
+        d = g.value(prop, RDFS.domain)
+        r = g.value(prop, RDFS.range)
+        if isinstance(d, URIRef):
+            classes.add(d)
+        if isinstance(r, URIRef):
+            classes.add(r)
+
     nodes = classes | individuals
 
-    # Fold datatype property values, comments, and source chunk(s) into each
+    # Fold definitions, datatype property values, comments, and source chunk(s) into each
     # node's tooltip.
     tooltips: dict[URIRef, list[str]] = {n: [] for n in nodes}
     for n in nodes:
         comment = g.value(n, RDFS.comment)
         if comment:
             tooltips[n].append(str(comment))
+        definition = g.value(n, SKOS.definition)
+        if definition:
+            tooltips[n].append(str(definition))
+        alt_labels = list(g.objects(n, _RDFS_ALT_LABEL)) + list(g.objects(n, SKOS.altLabel))
+        if alt_labels:
+            tooltips[n].append(f"alt: {', '.join(str(l) for l in alt_labels)}")
         for p, o in g.predicate_objects(n):
             if p in datatype_properties:
                 tooltips[n].append(f"{_label(g, p)}: {o}")
@@ -154,6 +178,7 @@ def build_pyvis_html(ttl: str, output_path: str, *, show_physics_controls: bool 
 
     for prop in object_properties:
         prop_label = _label(g, prop)
+        # 1. Instance assertions (s prop o)
         for s, o in g.subject_objects(prop):
             if isinstance(o, BNode) or s not in nodes or o not in nodes:
                 continue
@@ -161,6 +186,15 @@ def build_pyvis_html(ttl: str, output_path: str, *, show_physics_controls: bool 
             if key not in edges_added:
                 net.add_edge(str(s), str(o), label=prop_label)
                 edges_added.add(key)
+        # 2. Schema domain -> range relations
+        domain = g.value(prop, RDFS.domain)
+        range_ = g.value(prop, RDFS.range)
+        if isinstance(domain, URIRef) and isinstance(range_, URIRef):
+            if domain in nodes and range_ in nodes:
+                key = (str(domain), str(range_), prop_label)
+                if key not in edges_added:
+                    net.add_edge(str(domain), str(range_), label=prop_label)
+                    edges_added.add(key)
 
     net.set_options(json.dumps(_physics_options(show_physics_controls)))
     net.save_graph(output_path)
