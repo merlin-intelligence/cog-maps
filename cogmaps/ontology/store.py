@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS ontology_jobs (
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     progress_current  INTEGER NOT NULL DEFAULT 0,
-    progress_total    INTEGER NOT NULL DEFAULT 0
+    progress_total    INTEGER NOT NULL DEFAULT 0,
+    use_domain_discovery INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS ontology_job_logs (
@@ -48,6 +49,12 @@ class OntologyJobStore:
     def _init(self) -> None:
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
+            # Databases created before the domain-discovery option lack the column.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(ontology_jobs)")}
+            if "use_domain_discovery" not in columns:
+                conn.execute(
+                    "ALTER TABLE ontology_jobs ADD COLUMN use_domain_discovery INTEGER NOT NULL DEFAULT 0"
+                )
             # On startup, any job that was 'running' or 'pending' was interrupted
             # by a server restart — mark them failed so they don't hang forever.
             conn.execute(
@@ -73,16 +80,17 @@ class OntologyJobStore:
         doc_filenames: list[str],
         llm_provider: str,
         llm_model: str,
+        use_domain_discovery: bool = False,
     ) -> None:
         now = datetime.now().isoformat()
         with self._lock, self._conn() as conn:
             conn.execute(
                 """INSERT INTO ontology_jobs
                    (id, status, collection, ontology_id, doc_filenames_json,
-                    llm_provider, llm_model, created_at, updated_at)
-                   VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)""",
+                    llm_provider, llm_model, created_at, updated_at, use_domain_discovery)
+                   VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (job_id, collection, ontology_id, json.dumps(doc_filenames),
-                 llm_provider, llm_model, now, now),
+                 llm_provider, llm_model, now, now, int(use_domain_discovery)),
             )
 
     def set_status(self, job_id: str, status: str) -> None:
@@ -113,6 +121,7 @@ class OntologyJobStore:
                 return None
             job = dict(row)
             job["doc_filenames"] = json.loads(job["doc_filenames_json"])
+            job["use_domain_discovery"] = bool(job["use_domain_discovery"])
             return job
 
     def get_logs(self, job_id: str, after_rowid: int = 0) -> list[tuple[int, str]]:
@@ -134,4 +143,5 @@ class OntologyJobStore:
                 return None
             job = dict(row)
             job["doc_filenames"] = json.loads(job["doc_filenames_json"])
+            job["use_domain_discovery"] = bool(job["use_domain_discovery"])
             return job

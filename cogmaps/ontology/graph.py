@@ -24,7 +24,12 @@ INDIVIDUAL_COLOR = METHOD_COLORS["Hinge"]
 # URI (dedup/reuse) — only whatever this triple already holds is surfaced here.
 _EXTRACTED_FROM = URIRef("urn:olaf:extractedFrom")
 _CHUNK_URI_PREFIX = "urn:olaf:chunk:"
-_RDFS_ALT_LABEL = URIRef("http://www.w3.org/2000/01/rdf-schema#altLabel")
+# Vocabulary terms (owl:Thing, rdfs:Resource…) are never drawn as nodes.
+_BUILTIN_NAMESPACES = (str(OWL), str(RDF), str(RDFS))
+
+
+def _is_domain_class(node) -> bool:
+    return isinstance(node, URIRef) and not str(node).startswith(_BUILTIN_NAMESPACES)
 
 
 def _chunk_id_from_uri(uri: URIRef) -> str:
@@ -122,18 +127,18 @@ def build_pyvis_html(ttl: str, output_path: str, *, show_physics_controls: bool 
 
     # Include external or seed classes referenced in subClassOf
     for s, o in g.subject_objects(RDFS.subClassOf):
-        if isinstance(s, URIRef):
+        if _is_domain_class(s):
             classes.add(s)
-        if isinstance(o, URIRef):
+        if _is_domain_class(o):
             classes.add(o)
 
     # Include classes referenced in domain/range of object properties
     for prop in object_properties:
         d = g.value(prop, RDFS.domain)
         r = g.value(prop, RDFS.range)
-        if isinstance(d, URIRef):
+        if _is_domain_class(d):
             classes.add(d)
-        if isinstance(r, URIRef):
+        if _is_domain_class(r):
             classes.add(r)
 
     nodes = classes | individuals
@@ -148,7 +153,7 @@ def build_pyvis_html(ttl: str, output_path: str, *, show_physics_controls: bool 
         definition = g.value(n, SKOS.definition)
         if definition:
             tooltips[n].append(str(definition))
-        alt_labels = list(g.objects(n, _RDFS_ALT_LABEL)) + list(g.objects(n, SKOS.altLabel))
+        alt_labels = list(g.objects(n, SKOS.altLabel))
         if alt_labels:
             tooltips[n].append(f"alt: {', '.join(str(l) for l in alt_labels)}")
         for p, o in g.predicate_objects(n):

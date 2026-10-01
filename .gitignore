@@ -209,22 +209,14 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
-
 # Streamlit
 .streamlit/secrets.toml
 
-# Runtime and local cache directories
+# Local analysis / research notes (not versioned) — put them under docs/local/
+docs/local/
+
+# Runtime and local cache directories (users.json, OAuth tokens, jobs.db,
+# domain blueprints, downloaded cloud documents, graph exports)
 user_data/
+downloaded_corpus/
 temp_graph_outputs/
-downloaded_corpus
-
-# Analysis and research documentation created during development
-docs/CHANGES_LAST_3_DAYS.md
-docs/domain_discovery.md
-docs/ontology_build_llm_cost_analysis.md
-docs/ontology_code_prompt_relevance_across_domains.md
-

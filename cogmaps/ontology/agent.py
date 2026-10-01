@@ -22,12 +22,27 @@ from typing import TYPE_CHECKING, Any
 import litellm
 from mcp import ClientSession
 
+from cogmaps.ontology.olaf_config import has_ontology_content
 from cogmaps.ontology.prompts import SYSTEM_PROMPT, build_system_prompt
 
 if TYPE_CHECKING:
     from cogmaps.ontology.domain_discovery import DomainBlueprint
 
 MAX_ITERATIONS = 150
+
+# How many times in a row the model may stop while chunks are still pending
+# before the loop gives up (each nudge costs a full completion call).
+MAX_CONSECUTIVE_NUDGES = 3
+
+# Context compaction: tool results older than the most recent
+# KEEP_RECENT_TOOL_RESULTS are cut down to COMPACTED_PREVIEW_CHARS once they
+# exceed COMPACT_THRESHOLD_CHARS. Chunk texts (chunk_read_batch) and bulk
+# listings dominate the context and are no longer needed once processed;
+# short results such as the URIs returned by concept_create stay intact.
+KEEP_RECENT_TOOL_RESULTS = 12
+COMPACT_THRESHOLD_CHARS = 1500
+COMPACTED_PREVIEW_CHARS = 300
+_COMPACTED_MARKER = "[…truncated to save context — call the tool again if you need the full result]"
 
 
 def mcp_tools_to_litellm(mcp_tools: list) -> list[dict]:
@@ -63,6 +78,58 @@ def _build_user_message(doc_filenames: list[str]) -> str:
             f"document IDs at a time via the doc_id parameter."
         )
     return "Build the ontology from all available Qdrant chunks in the collection."
+
+
+def _compact_history(messages: list[dict[str, Any]]) -> int:
+    """Truncate old, large tool results in place. Returns how many were compacted.
+
+    Only ``content`` is shortened — every tool message stays, so each
+    assistant ``tool_calls`` entry keeps its matching ``tool_call_id``.
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    compacted = 0
+    for i in tool_indices[:-KEEP_RECENT_TOOL_RESULTS] if KEEP_RECENT_TOOL_RESULTS else tool_indices:
+        content = messages[i].get("content") or ""
+        if len(content) > COMPACT_THRESHOLD_CHARS and not content.endswith(_COMPACTED_MARKER):
+            messages[i]["content"] = f"{content[:COMPACTED_PREVIEW_CHARS]}\n{_COMPACTED_MARKER}"
+            compacted += 1
+    return compacted
+
+
+async def _docs_with_pending_chunks(session: ClientSession, doc_filenames: list[str]) -> list[str] | None:
+    """Ask OLAF which of the requested documents still have pending chunks.
+
+    Returns the documents (or ``["<collection>"]`` when the build isn't scoped
+    to documents) that still have at least one pending chunk, or None if OLAF
+    couldn't answer — the caller then treats the work as unfinished.
+    """
+    scopes: list[str | None] = list(doc_filenames) or [None]
+    remaining: list[str] = []
+    for doc in scopes:
+        args: dict[str, Any] = {"status": "pending", "limit": 1}
+        if doc:
+            args["doc_id"] = doc
+        try:
+            result = await session.call_tool("chunk_list", args)
+            chunks = json.loads(result.content[0].text) if result.content else []
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(chunks, list):
+            return None
+        if chunks:
+            remaining.append(doc or "<collection>")
+    return remaining
+
+
+def _nudge_message(remaining: list[str] | None) -> str:
+    where = f" Documents with pending chunks: {', '.join(remaining)}." if remaining else ""
+    return (
+        "Do not stop yet — some chunks are still pending." + where + " "
+        "Call chunk_list with doc_id and status=\"pending\" (move on to the next doc_id once a document has none left), "
+        "read them in batches of 5 to 10 with chunk_read_batch, extract what is relevant (search for existing "
+        "concepts and properties before creating new ones), and mark chunks processed. Once no pending chunks "
+        "remain, call ontology_orphans and connect the isolated entities, then call ontology_export."
+    )
 
 
 async def run_build(
@@ -102,10 +169,15 @@ async def run_build(
     ]
 
     total_tool_calls = 0
+    consecutive_nudges = 0
 
     for iteration in range(1, max_iterations + 1):
         log(f"--- Iteration {iteration}/{max_iterations} ---")
         set_progress(iteration, max_iterations)
+
+        compacted = _compact_history(messages)
+        if compacted:
+            log(f"Compacted {compacted} old tool result(s) to keep the context small.")
 
         response = await asyncio.to_thread(
             litellm.completion,
@@ -123,25 +195,28 @@ async def run_build(
         msg = response.choices[0].message
 
         if not msg.tool_calls:
-            exported = any(m.get("tool_call_id") and m.get("name") == "ontology_export" for m in messages)
-            if not exported and iteration < max_iterations:
-                if msg.content:
-                    log(f"Agent interim note: {msg.content[:200]}")
-                messages.append({"role": "assistant", "content": msg.content or ""})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Do not stop yet. Continue processing all remaining document chunks across the selected documents. "
-                        "Call chunk_list (using offset or next doc_id) and chunk_read_batch to read chunks in batches, "
-                        "extract concepts, properties, and relations, mark chunks processed, and call ontology_export when all chunks are covered."
-                    ),
-                })
-                continue
-            log("Agent finished — model returned no further tool calls.")
             if msg.content:
-                log(f"Final message: {msg.content}")
-            break
+                log(f"Agent message: {msg.content[:200]}")
+            # Stopping is only accepted once OLAF confirms no requested chunk is
+            # still pending — the model's own claim that it is done isn't enough.
+            remaining = await _docs_with_pending_chunks(session, doc_filenames)
+            if remaining == []:
+                log("Agent finished — no pending chunks remain.")
+                break
+            if consecutive_nudges >= MAX_CONSECUTIVE_NUDGES or iteration == max_iterations:
+                pending_info = ", ".join(remaining) if remaining else "unknown (chunk_list failed)"
+                log(
+                    f"Agent stopped after {consecutive_nudges} nudge(s) while chunks are still pending "
+                    f"({pending_info}). Re-launch the build to continue — processed chunks are skipped."
+                )
+                break
+            consecutive_nudges += 1
+            log(f"Nudging the agent to continue ({consecutive_nudges}/{MAX_CONSECUTIVE_NUDGES}).")
+            messages.append({"role": "assistant", "content": msg.content or ""})
+            messages.append({"role": "user", "content": _nudge_message(remaining)})
+            continue
 
+        consecutive_nudges = 0
         messages.append({
             "role": "assistant",
             "content": msg.content,
@@ -175,12 +250,13 @@ async def run_build(
             log(f"  -> {content[:200]}")
 
             if tool_name == "ontology_export" and content:
-                # Avoid overwriting the persisted file with global seeds or empty models during early exploration
-                if iteration > 2 and ("owl:Class" in content or "a <http://www.w3.org/2002/07/owl#Class>" in content):
+                # Seed-inclusive exports (step 2 of the workflow, to read the seeds)
+                # and empty graphs must not overwrite the persisted ontology.
+                if not tool_args.get("include_seeds") and has_ontology_content(content):
                     export_cb(content)
                     log("Ontology exported.")
                 else:
-                    log("Intermediate ontology export received (skipped persisting seed-only or pre-build graph).")
+                    log("Intermediate ontology export received (skipped persisting seed-inclusive or empty graph).")
 
             messages.append({
                 "role": "tool",

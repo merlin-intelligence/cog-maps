@@ -161,6 +161,15 @@ def max_analysis_documents() -> int:
     return _int_env("MAX_ANALYSIS_DOCUMENTS", 3000)
 
 
+def chat_max_tokens() -> int:
+    """Token budget for one /ask/ answer from Nebius (``CHAT_MAX_TOKENS``, default 8192).
+
+    Reasoning models spend part of it thinking before they answer, so a low
+    cap truncates long answers or leaves no room for the answer at all.
+    """
+    return _int_env("CHAT_MAX_TOKENS", 8192)
+
+
 def nebius_api_key() -> str:
     """Nebius / AI Hub API key from env or st.secrets (or empty string if not set)."""
     key = os.getenv("NEBIUS_API_KEY", "").strip()
@@ -175,7 +184,7 @@ def nebius_api_key() -> str:
 
 
 def domain_discovery_model() -> str:
-    """Model used for Phase 0 domain discovery synthesis (fast, high throughput)."""
+    """Model used for domain discovery synthesis (fast, high throughput)."""
     return os.getenv("DOMAIN_DISCOVERY_MODEL", DEFAULT_DOMAIN_DISCOVERY_MODEL).strip() or DEFAULT_DOMAIN_DISCOVERY_MODEL
 
 

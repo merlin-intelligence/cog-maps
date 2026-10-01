@@ -235,6 +235,12 @@ Most editors have a Ruff plugin that runs the linter and formatter on save:
 
 The plugins pick up the project configuration automatically from `pyproject.toml`, so there is nothing extra to configure.
 
+### Local notes and runtime data
+
+Personal analysis or research notes (cost analyses, investigation write-ups…) go under `docs/local/`, which is git-ignored — keep `docs/` for documentation meant for everyone.
+
+Never commit runtime data: `user_data/` (accounts, OAuth tokens, job databases, domain blueprints), `downloaded_corpus/`, `temp_graph_outputs/`, `.env` and `.streamlit/secrets.toml` are all git-ignored on purpose.
+
 ### One issue, one branch, one PR
 
 Create a **new issue and a new branch for each need**. Keep changes separated as much as possible:

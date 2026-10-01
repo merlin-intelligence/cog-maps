@@ -202,6 +202,7 @@ def _render_job_status() -> None:
     if not job:
         return
 
+    st.markdown("---")
     status = job["status"]
     icons = {"pending": "⏳", "running": "⚙️", "done": "✅", "failed": "❌"}
     st.markdown(f"**{icons.get(status, '·')} ingestion job** — `{status}`")
@@ -230,7 +231,7 @@ def _render_job_status() -> None:
     if status == "done":
         st.success("Ingestion complete!")
     elif status == "failed":
-        st.error("Ingestion failed — see log above.")
+        st.error("Ingestion failed — see the processing log.")
 
 
 # Reconnect banner: if a job is already running for this collection but this
@@ -246,8 +247,6 @@ if "active_job_id" not in st.session_state:
         if st.button("monitor this job"):
             _activate_job(latest["id"])
             st.rerun()
-
-_render_job_status()
 
 st.markdown("---")
 
@@ -492,3 +491,7 @@ elif ingestion_source == "SharePoint":
                     logger.exception("SharePoint ingestion failed")
             else:
                 st.warning("Fill in all SharePoint fields.")
+
+
+# Rendered last so the job's progress and log appear below the start button.
+_render_job_status()

@@ -75,7 +75,9 @@ def answer_question(
     answer = llm_client.chat(
         system_prompt=(
             "You are a helpful assistant. Answer the question based on the provided context. "
-            "Explicitly cite the chunk number (e.g. [Chunk 1]) for every piece of information you use."
+            "Explicitly cite the chunk number (e.g. [Chunk 1]) for every piece of information you use. "
+            "Reply with the final answer only: do not describe your reasoning, your analysis of the "
+            "chunks or the steps you followed."
         ),
         user_content=f"Context:\n{context}\n\nQuestion: {prompt}",
     )

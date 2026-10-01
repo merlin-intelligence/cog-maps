@@ -1,8 +1,9 @@
-"""Automated Phase 0 Domain Discovery Engine for CogMaps & OLAF.
+"""Domain discovery engine for CogMaps & OLAF.
 
 Discovers the latent domain, epistemological nature, taxonomical pillars,
 key entity types, and cross-cutting relationships of a corpus using fast,
-stratified pre-retrieval sampling and GLM-5.3-Flash synthesis.
+per-document chunk sampling and an LLM synthesis call
+(``DOMAIN_DISCOVERY_MODEL``, GLM-5.3-Flash by default).
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import logging
 import os
 import random
 import re
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -49,7 +51,7 @@ class DomainPillar(BaseModel):
 
 
 class DomainBlueprint(BaseModel):
-    """Complete domain architecture blueprint synthesized in Phase 0."""
+    """Complete domain architecture blueprint synthesized by domain discovery."""
     inferred_domain: str = Field(description="High-level identity of the corpus")
     epistemological_nature: str = Field(
         default="Interdisciplinary",
@@ -71,9 +73,56 @@ class DomainBlueprint(BaseModel):
         default_factory=list,
         description="Cross-pillar relationships to prevent siloed, disconnected sub-graphs",
     )
+    generated_at: str | None = Field(
+        default=None,
+        description="ISO timestamp of the discovery run that produced this blueprint (None if hand-made)",
+    )
+    source_document_count: int | None = Field(
+        default=None,
+        description="Number of documents in the collection when discovery ran (None if hand-made)",
+    )
 
 
 # ─── Stage 1: Stratified Corpus Profiling ───────────────────────────────────
+
+_SAMPLE_PAYLOAD = ["filename", "chunk_number", "text"]
+
+
+def _random_points(store: QdrantStore, collection: str, limit: int, flt: models.Filter | None = None) -> list:
+    """Draw ``limit`` random points (optionally filtered) from a collection.
+
+    Uses Qdrant's native random sampling (server >= 1.11). Falls back to a
+    plain scroll — i.e. the first points in storage order — on older servers.
+    """
+    try:
+        return store.client.query_points(
+            collection_name=collection,
+            query=models.SampleQuery(sample=models.Sample.RANDOM),
+            query_filter=flt,
+            limit=limit,
+            with_payload=_SAMPLE_PAYLOAD,
+            with_vectors=False,
+        ).points
+    except Exception:  # noqa: BLE001
+        logger.warning("Random sampling unavailable on Qdrant, falling back to scroll", exc_info=True)
+        points, _ = store.client.scroll(
+            collection_name=collection,
+            scroll_filter=flt,
+            limit=limit,
+            with_payload=_SAMPLE_PAYLOAD,
+            with_vectors=False,
+        )
+        return points
+
+
+def _to_sample(point, default_doc: str, char_limit: int) -> dict[str, Any]:
+    payload = point.payload or {}
+    return {
+        "doc": payload.get("filename", default_doc),
+        "chunk_number": payload.get("chunk_number", 0),
+        "text": str(payload.get("text", ""))[:char_limit],
+    }
+
 
 def sample_corpus_for_discovery(
     store: QdrantStore,
@@ -82,10 +131,12 @@ def sample_corpus_for_discovery(
     char_limit_per_chunk: int = 500,
     seed: int = 42,
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """Sample document filenames and representative text chunks across a collection.
+    """Sample document filenames and random text chunks across a collection.
 
-    Pulls 1 representative chunk per document (up to max_chunks docs) to avoid
-    early-document bias and explore the full breadth of the corpus in <1 second.
+    Pulls 1 randomly chosen chunk per document (up to max_chunks docs) rather
+    than each document's first chunk, which is often a title page or table of
+    contents. Chunks are drawn at random on every call, so two discoveries on
+    the same collection may see different excerpts.
     """
     all_filenames = sorted(store.existing_filenames(collection))
     if not all_filenames:
@@ -97,41 +148,19 @@ def sample_corpus_for_discovery(
     else:
         sampled_filenames = random.Random(seed).sample(all_filenames, max_chunks)
 
-    samples: list[dict[str, Any]] = []
-
-    # If only 1 document is present, sample multiple chunks across it
+    # If only 1 document is present, sample multiple random chunks across it
     if len(all_filenames) == 1:
-        points, _ = store.client.scroll(
-            collection_name=collection,
-            limit=max_chunks,
-            with_payload=["filename", "chunk_number", "text"],
-            with_vectors=False,
-        )
-        for p in points:
-            payload = p.payload or {}
-            samples.append({
-                "doc": payload.get("filename", all_filenames[0]),
-                "chunk_number": payload.get("chunk_number", 0),
-                "text": str(payload.get("text", ""))[:char_limit_per_chunk],
-            })
+        points = _random_points(store, collection, limit=max_chunks)
+        samples = [_to_sample(p, all_filenames[0], char_limit_per_chunk) for p in points]
+        samples.sort(key=lambda s: s["chunk_number"])
         return all_filenames, samples
 
+    samples: list[dict[str, Any]] = []
     for doc in sampled_filenames:
         flt = models.Filter(must=[models.FieldCondition(key="filename", match=models.MatchValue(value=doc))])
-        points, _ = store.client.scroll(
-            collection_name=collection,
-            scroll_filter=flt,
-            limit=1,
-            with_payload=["filename", "chunk_number", "text"],
-            with_vectors=False,
-        )
+        points = _random_points(store, collection, limit=1, flt=flt)
         if points:
-            payload = points[0].payload or {}
-            samples.append({
-                "doc": payload.get("filename", doc),
-                "chunk_number": payload.get("chunk_number", 0),
-                "text": str(payload.get("text", ""))[:char_limit_per_chunk],
-            })
+            samples.append(_to_sample(points[0], doc, char_limit_per_chunk))
 
     return all_filenames, samples
 
@@ -139,23 +168,23 @@ def sample_corpus_for_discovery(
 # ─── Stage 2 & 3: Meta-Discovery Synthesizer Prompt ──────────────────────────
 
 DISCOVERY_SYSTEM_PROMPT = """You are an expert ontology engineer and taxonomist specializing in domain discovery and knowledge modeling.
-Your mission is Phase 0: Meta-Discovery. Given a corpus profile (collection name, sampled document filenames, and representative text excerpts), you analyze the latent themes, identify the true domain (looking past misleading, metaphorical, or colloquial collection names), and construct a rigorous taxonomical domain blueprint.
+Your mission is domain discovery. Given a corpus profile (collection name, sampled document filenames, and representative text excerpts), you analyze the latent themes, identify the true domain (looking past misleading, metaphorical, or colloquial collection names), and construct a rigorous taxonomical domain blueprint.
 
 ## Methodological Grounding & Epistemological Types
 Domains generally fall into one of three epistemological categories:
 1. Empirical / Dynamic (e.g., Quantitative Finance, Economics, Climate Science):
    - Defined by observable state variables, quantitative metrics, mechanisms, instruments, causal feedback loops.
-   - Example Archetype (quant-macro-research):
+   - Example Archetype (a macroeconomic research corpus):
      Pillars: Financial Instruments (parent: Asset), Yield Curve & Rates (parent: Metric/Rate), Central Bank Mechanisms (parent: MonetaryOperation), Fiscal Operations (parent: SovereignDebtOperation), Macro Indicators (parent: MacroeconomicIndicator), Market Regimes (parent: MarketState).
      Object properties: drives, absorbsSupplyOf, hedgesAgainst, setsPolicyRate, impactsInflation.
 2. Deontic / Hierarchical (e.g., Administrative Law, Regulatory Compliance, Public Governance):
    - Defined by statutory authorities, normative hierarchies, legal procedures, jurisdictions, compliance rules.
-   - Example Archetype (agiradm):
+   - Example Archetype (an administrative law corpus):
      Pillars: Normative Acts (parent: LegalNorm), Administrative Authorities (parent: PublicAuthority), Legal Procedures (parent: ProceduralRemedy), Public Contracts (parent: AdministrativeAgreement), Civil Service (parent: GovernanceFramework), Jurisprudence (parent: LegalPrecedent).
      Object properties: promulgates, overrules, implements, appealsAgainst, bindsAuthority.
 3. Latent / Interdisciplinary Synthesis (e.g., Behavioral Dynamics, Cognitive Science, Socio-Psychology):
    - Defined by biological/affective drivers, psychological mechanisms, relational dynamics, cultural constructs, decision architecture.
-   - Example Archetype (animal trail):
+   - Example Archetype (a behavioral science corpus):
      Pillars: Affective & Biological Systems (parent: BiologicalDrive), Cognitive Biases & Heuristics (parent: CognitiveProcess), Relational Dynamics & Mimesis (parent: SocialInteraction), Cultural & Narrative Constructs (parent: SymbolicModel), Behavioral Interventions & Nudges (parent: DecisionArchitecture).
      Object properties: regulatesAffectiveState, sublimatesDrive, mitigatesBias, embodiesArchetype, triggersResponse.
 
@@ -223,13 +252,9 @@ def _extract_json(raw_text: str) -> dict:
     except Exception:
         pass
 
-    # Attempt 3: Escape unescaped newlines inside strings
-    def replace_newlines(match: re.Match) -> str:
-        return match.group(0).replace("\n", "\\n")
-
-    t_newlines = re.sub(r'"([^"\\]*(\\.[^"\\]*)*)"', replace_newlines, t_commas, flags=re.DOTALL)
+    # Attempt 3: Tolerate raw control characters (e.g. newlines) inside strings
     try:
-        return json.loads(t_newlines)
+        return json.loads(t_commas, strict=False)
     except Exception as e:
         raise ValueError(f"Could not parse valid JSON from text: {e}") from e
 
@@ -242,7 +267,7 @@ def synthesize_domain_blueprint(
     model: str | None = None,
     api_key: str | None = None,
 ) -> DomainBlueprint:
-    """Synthesize a DomainBlueprint using GLM-5.3-Flash via Nebius Chat Completions."""
+    """Synthesize a DomainBlueprint via Nebius Chat Completions (``DOMAIN_DISCOVERY_MODEL`` by default)."""
     target_model = model or domain_discovery_model()
     target_key = api_key or nebius_api_key()
     if not target_key:
@@ -330,6 +355,16 @@ def save_blueprint(collection: str, blueprint: DomainBlueprint, base_dir: str | 
     return path
 
 
+def delete_blueprint(collection: str, base_dir: str | None = None) -> bool:
+    """Remove a collection's cached DomainBlueprint. Returns False if there was none."""
+    path = profile_path_for(collection, base_dir)
+    if not os.path.exists(path):
+        return False
+    os.remove(path)
+    logger.info("Deleted domain blueprint for %s (%s)", collection, path)
+    return True
+
+
 def load_blueprint(collection: str, base_dir: str | None = None) -> DomainBlueprint | None:
     """Load a cached DomainBlueprint from disk if it exists."""
     path = profile_path_for(collection, base_dir)
@@ -352,10 +387,10 @@ def discover_domain(
     force: bool = False,
     base_dir: str | None = None,
 ) -> DomainBlueprint:
-    """End-to-end Phase 0 Domain Discovery.
+    """End-to-end domain discovery.
 
     Returns cached blueprint if available (unless force=True), otherwise samples
-    the corpus and calls GLM-5.3-Flash, caches the blueprint, and returns it.
+    the corpus and calls the discovery model, caches the blueprint, and returns it.
     """
     if not force:
         cached = load_blueprint(collection, base_dir=base_dir)
@@ -374,5 +409,7 @@ def discover_domain(
         model=model,
         api_key=api_key,
     )
+    blueprint.generated_at = datetime.now().isoformat(timespec="seconds")
+    blueprint.source_document_count = len(all_docs)
     save_blueprint(collection, blueprint, base_dir=base_dir)
     return blueprint

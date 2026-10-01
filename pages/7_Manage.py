@@ -13,6 +13,7 @@ from cogmaps.ontology.cleanup import (
     list_seed_ids,
     ontology_exists_for,
 )
+from cogmaps.ontology.domain_discovery import delete_blueprint
 from cogmaps.ontology.olaf_config import sanitize_ontology_id
 from cogmaps.ui.auth import (
     check_password,
@@ -78,8 +79,8 @@ with st.expander("⚠ danger zone — delete entire collection"):
         # the collection it was built from.
         st.warning(
             "⚠ Deleting this collection will also permanently delete the ontology "
-            "built for it in Oxigraph (if any), including its concepts collection and "
-            "cached Turtle export. This does not go the other way: deleting an ontology "
+            "built for it in Oxigraph (if any), including its concepts collection, "
+            "cached Turtle export and domain blueprint. This does not go the other way: deleting an ontology "
             "never deletes the collection."
         )
         # Key includes qdrant_col so switching the selected collection doesn't
@@ -96,6 +97,12 @@ with st.expander("⚠ danger zone — delete entire collection"):
                             st.caption(f"✓ {msg}")
                     except Exception as e:  # noqa: BLE001
                         st.warning(f"Could not fully delete the associated ontology: {e}")
+                # A blueprint can exist without any ontology (discovery run, no build yet).
+                try:
+                    if delete_blueprint(qdrant_col):
+                        st.caption("✓ Domain blueprint removed.")
+                except OSError as e:
+                    st.warning(f"Could not delete the domain blueprint: {e}")
                 try:
                     store.delete_collection(qdrant_col)
                     st.success(f"'{collection_name}' deleted.")
@@ -116,7 +123,7 @@ with st.expander("⚠ danger zone — delete ontology only"):
             f'<p style="font-family:\'DM Mono\',monospace;font-size:0.78rem;color:#a82020">'
             f'This will permanently delete the ontology for <strong>{html.escape(collection_name)}</strong> '
             f'(named graph <code>urn:olaf:{_ontology_id}</code>) from Oxigraph, its concepts collection, '
-            f'and the cached Turtle export. <strong>The Qdrant collection itself is never affected.</strong></p>',
+            f'the cached Turtle export and the domain blueprint. <strong>The Qdrant collection itself is never affected.</strong></p>',
             unsafe_allow_html=True,
         )
         if st.checkbox(

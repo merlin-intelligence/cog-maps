@@ -1,6 +1,8 @@
 """Unit tests for the pluggable Chat-page LLM backend (Nebius cloud / local Ollama)."""
 from __future__ import annotations
 
+import pytest
+
 from cogmaps import config
 from cogmaps.rag.llm_clients import NebiusClient, OllamaClient, build_llm_client
 from cogmaps.ui.components import SidebarState
@@ -152,3 +154,46 @@ def test_nebius_client_org_match_is_exact_not_substring():
     # only an exact "openai" org (before the first "/") should match.
     client = NebiusClient(model="notopenai/some-model", api_key="k")
     assert client.api_url == "https://api.studio.nebius.ai/v1/chat/completions"
+
+
+# ── Reasoning is never shown in the answer ──
+
+class _FakeResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def _nebius_reply(monkeypatch, message, finish_reason="stop"):
+    payload = {"choices": [{"message": message, "finish_reason": finish_reason}]}
+    monkeypatch.setattr("cogmaps.rag.llm_clients.requests.post", lambda *a, **kw: _FakeResponse(payload))
+    return NebiusClient(model="zai-org/GLM-5.3", api_key="key")
+
+
+def test_strip_reasoning_removes_think_blocks():
+    from cogmaps.rag.llm_clients import strip_reasoning
+
+    assert strip_reasoning("<think>let me see</think>\n\nThe answer [Chunk 1].") == "The answer [Chunk 1]."
+    assert strip_reasoning("<think>cut off mid-thought") == ""
+    assert strip_reasoning("Plain answer.") == "Plain answer."
+
+
+def test_nebius_client_hides_reasoning_content(monkeypatch):
+    client = _nebius_reply(monkeypatch, {"content": "The answer [Chunk 1].", "reasoning_content": "Step 1..."})
+    assert client.chat("sys", "q") == "The answer [Chunk 1]."
+
+
+def test_nebius_client_explains_reasoning_that_ate_the_budget(monkeypatch):
+    client = _nebius_reply(monkeypatch, {"content": "", "reasoning_content": "Step 1..."}, finish_reason="length")
+    with pytest.raises(RuntimeError, match="token budget"):
+        client.chat("sys", "q")
+
+
+def test_ollama_client_strips_inline_think_block(monkeypatch):
+    payload = {"message": {"content": "<think>hmm</think>The answer."}}
+    monkeypatch.setattr("cogmaps.rag.llm_clients.requests.post", lambda *a, **kw: _FakeResponse(payload))
+    assert OllamaClient(model="qwen3:8b", host="http://localhost:11434").chat("sys", "q") == "The answer."

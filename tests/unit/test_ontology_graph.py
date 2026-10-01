@@ -87,7 +87,7 @@ def test_build_pyvis_html_renders_schema_domain_range_edges_and_external_parents
     :TreasuryBond a owl:Class ;
         rdfs:label "Treasury Bond" ;
         skos:definition "A sovereign bond issued by the Treasury." ;
-        rdfs:altLabel "T-Bond" ;
+        skos:altLabel "T-Bond" ;
         rdfs:subClassOf seed:Asset .
 
     :Yield a owl:Class ;
@@ -114,3 +114,20 @@ def test_build_pyvis_html_renders_schema_domain_range_edges_and_external_parents
     # SKOS definition and alt label should appear in tooltip
     assert "A sovereign bond issued by the Treasury." in content
     assert "alt: T-Bond" in content
+
+
+def test_build_pyvis_html_does_not_draw_owl_thing_as_a_node(tmp_path):
+    ttl = """
+    @prefix : <http://olaf.local/ontology#> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+    :Root a owl:Class ; rdfs:label "Root" ; rdfs:subClassOf owl:Thing .
+    :rel a owl:ObjectProperty ; rdfs:label "rel" ; rdfs:domain :Root ; rdfs:range rdfs:Resource .
+    """
+    out = tmp_path / "builtins.html"
+    build_pyvis_html(ttl, str(out))
+    content = out.read_text(encoding="utf-8")
+    assert "Root" in content
+    assert "owl#Thing" not in content
+    assert "rdf-schema#Resource" not in content

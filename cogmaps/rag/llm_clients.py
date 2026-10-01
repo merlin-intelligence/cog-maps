@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import requests
+
+from cogmaps.config import chat_max_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +16,18 @@ logger = logging.getLogger(__name__)
 # accidental matches if a future model name happens to contain "openai"
 # elsewhere in it.
 _TOKENFACTORY_ORGS = frozenset({"moonshotai", "openai", "zai-org"})
+
+# Some reasoning models (DeepSeek-R1, Qwen3… on Ollama or Nebius) inline their
+# chain of thought in the answer text instead of a separate field.
+_THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """Remove inline ``<think>…</think>`` blocks (and a dangling unclosed one) from a model answer."""
+    text = _THINK_BLOCK.sub("", text)
+    if re.match(r"\s*<think>", text, re.IGNORECASE):
+        return ""  # reasoning cut off before the answer even started
+    return text.strip()
 
 
 def resolve_nebius_endpoint(model: str) -> tuple[str, str]:
@@ -56,7 +71,7 @@ class NebiusClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content_payload},
             ],
-            "max_tokens": 2048,
+            "max_tokens": chat_max_tokens(),
             "temperature": 0.7,
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -74,17 +89,21 @@ class NebiusClient:
             logger.error("Nebius unexpected response format: %s", result)
             raise RuntimeError(f"Unexpected response format: {result}")
 
-        msg = result["choices"][0]["message"]
-        content = msg.get("content") or ""
+        choice = result["choices"][0]
+        msg = choice["message"]
+        # Reasoning models return their chain of thought separately
+        # (reasoning_content / reasoning) — only the answer is shown to the user.
         reasoning = msg.get("reasoning_content") or msg.get("reasoning")
-
-        answer = ""
         if reasoning:
-            answer += f"**[Reasoning Process]**\n{reasoning}\n\n---\n\n"
-        if content:
-            answer += content
+            logger.debug("Nebius reasoning (not shown): %s", reasoning[:500])
+        answer = strip_reasoning(msg.get("content") or "")
 
-        if not answer.strip():
+        if not answer:
+            if reasoning and choice.get("finish_reason") == "length":
+                raise RuntimeError(
+                    f"{self.model} used its whole token budget reasoning and produced no answer — "
+                    "raise CHAT_MAX_TOKENS, or pick a non-reasoning model."
+                )
             logger.error("Nebius empty content in response: %s", result)
             raise RuntimeError(f"Empty content in response: {result}")
         logger.debug("Nebius chat done: answer_len=%d", len(answer))
@@ -127,8 +146,8 @@ class OllamaClient:
             raise RuntimeError(f"{self.vendor} API {response.status_code}: {response.text}")
 
         result = response.json()
-        content = (result.get("message") or {}).get("content", "") or ""
-        if not content.strip():
+        content = strip_reasoning((result.get("message") or {}).get("content", "") or "")
+        if not content:
             logger.error("Ollama empty content in response: %s", result)
             raise RuntimeError(f"Empty content in response: {result}")
         logger.debug("Ollama chat done: model=%s answer_len=%d", self.model, len(content))
