@@ -34,7 +34,8 @@ CogMaps is a sophisticated knowledge management and exploration application buil
    - Builds an OWL/RDFS ontology from documents already in Qdrant: a Scaleway tool-calling agent drives [OLAF](https://github.com/merlin-intelligence/olaf) (MCP server) and stores the triples in **Oxigraph** (RDF triplestore, via Docker).
    - Background jobs, like ingestion — an interrupted build can be re-launched and resumes where it stopped (processed chunks are skipped).
    - Optional **domain discovery**: a per-collection *domain blueprint* (inferred domain + taxonomical pillars), synthesized from a corpus sample or written by hand, tailors the agent's prompt. Opt-in per build.
-   - Read-only explorer: browse every ontology stored in Oxigraph as a graph or raw Turtle, and run SPARQL queries.
+   - **Ask the ontology**: a read-only search agent (ported from OLAF's `olaf_searching_agent` demo) answers natural-language questions with OLAF's search tools and agent-written SPARQL, then shows the part of the ontology it used (entities + direct neighbors) and the source chunks behind the answer. Follow-up questions keep the conversation's context.
+   - Read-only explorer: browse an ontology as a graph or raw Turtle, and run SPARQL queries.
 
 ## Stability & Performance
 
@@ -64,7 +65,7 @@ cogmaps/                      importable package
 ├── pipelines/                 ingestion orchestration (Ingester)
 ├── jobs/                       async ingestion job system (SQLite store + daemon runner)
 ├── ontology/                   ontology building — OLAF/MCP agent loop, build job runner,
-│                             domain discovery, Oxigraph client, graph view, cleanup
+│                             domain discovery, search agent, Oxigraph client, graph view, cleanup
 └── ui/                          Streamlit-only code (auth, components, styles)
 
 streamlit_app.py            entry point — `streamlit run streamlit_app.py`

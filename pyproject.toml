@@ -36,7 +36,7 @@ dependencies = [
     # — capped here since OLAF's own "mcp>=1.0.0" has no upper bound and lets
     # pip resolve an incompatible 2.x otherwise.
     "mcp<2.0.0",
-    "olaf @ git+https://github.com/merlin-intelligence/olaf.git",
+    "olaf @ git+https://github.com/merlin-intelligence/olaf.git@6b5a523a4ad825e1d38fa5957b440dd7c4d9e91a",
     "litellm",
     "rdflib",
 ]

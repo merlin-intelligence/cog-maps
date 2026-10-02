@@ -8,14 +8,24 @@ from __future__ import annotations
 
 import html
 import json
+from collections.abc import Collection, Iterable
 
 from pyvis.network import Network
-from rdflib import OWL, RDF, RDFS, SKOS, BNode, Graph, URIRef
+from rdflib import OWL, RDF, RDFS, SKOS, BNode, Graph, Literal, URIRef
 
-from cogmaps.config import GRAPH_BG_COLOR, GRAPH_EDGE_COLOR, GRAPH_TEXT_COLOR, METHOD_COLORS
+from cogmaps.config import (
+    GRAPH_BG_COLOR,
+    GRAPH_EDGE_COLOR,
+    GRAPH_TEXT_COLOR,
+    METHOD_COLORS,
+    PROMPT_NODE_COLOR,
+)
 
 CLASS_COLOR = METHOD_COLORS["Theta"]
 INDIVIDUAL_COLOR = METHOD_COLORS["Hinge"]
+# Border of the nodes an Ontology Explorer answer is built on — same accent as
+# the prompt node on the Graph Explorer page.
+HIGHLIGHT_COLOR = PROMPT_NODE_COLOR
 
 # OLAF's provenance predicate — see olaf.ontology.concept_create/individual_create,
 # which (when given source_chunk_id) insert <uri> <urn:olaf:extractedFrom>
@@ -103,23 +113,12 @@ def _label(g: Graph, node: URIRef) -> str:
     return str(label) if label else _local_name(node)
 
 
-def build_pyvis_html(ttl: str, output_path: str, *, show_physics_controls: bool = True) -> str:
-    """Parse ``ttl`` and render a navigable pyvis graph to ``output_path``.
+def _classify(g: Graph) -> tuple[set, set, set, set]:
+    """``(classes, individuals, object_properties, datatype_properties)`` of ``g``.
 
-    Nodes: ``owl:Class`` and ``owl:NamedIndividual`` subjects, labeled via
-    ``rdfs:label`` (falling back to the URI's local name). Edges:
-    ``rdfs:subClassOf`` (hierarchy) and any user-declared ``owl:ObjectProperty``
-    relation between two such nodes. Datatype property values, comments, and
-    any ``urn:olaf:extractedFrom`` source-chunk link(s) are folded into the
-    subject node's tooltip instead of becoming separate nodes.
-
-    ``show_physics_controls`` toggles vis-network's built-in physics-tuning
-    panel (sliders for gravity/spring length/etc.) below the graph — on by
-    default, off for the Ontology Explorer page.
+    Classes also include external or seed classes that are only referenced
+    through ``rdfs:subClassOf`` or an object property's domain/range.
     """
-    g = Graph()
-    g.parse(data=ttl, format="turtle")
-
     classes = set(g.subjects(RDF.type, OWL.Class))
     individuals = set(g.subjects(RDF.type, OWL.NamedIndividual))
     object_properties = set(g.subjects(RDF.type, OWL.ObjectProperty))
@@ -141,6 +140,89 @@ def build_pyvis_html(ttl: str, output_path: str, *, show_physics_controls: bool 
         if _is_domain_class(r):
             classes.add(r)
 
+    return classes, individuals, object_properties, datatype_properties
+
+
+def extract_subgraph(ttl: str, uris: Iterable[str], *, neighbors: bool = True) -> tuple[str, set[str]]:
+    """Cut the part of an ontology that ``uris`` are about out of its Turtle.
+
+    Returns ``(subgraph_turtle, focus)``: ``focus`` is the subset of ``uris``
+    that are classes, individuals or properties of the ontology (anything else
+    — vocabulary terms, chunk URIs, URIs from another graph — is dropped).
+    The subgraph keeps the focus classes and individuals, the classes a focus
+    property links (its domain and range) and, with ``neighbors``, every class
+    or individual directly connected to a focus node. Only triples between
+    kept nodes survive (plus their labels, comments, types and provenance),
+    so :func:`build_pyvis_html` draws no node beyond them.
+    """
+    g = Graph()
+    g.parse(data=ttl, format="turtle")
+    classes, individuals, object_properties, datatype_properties = _classify(g)
+    nodes = classes | individuals
+    properties = object_properties | datatype_properties
+
+    focus = {URIRef(u) for u in uris} & (nodes | properties)
+    keep = focus & nodes
+    for prop in focus & properties:
+        keep.update(n for n in (g.value(prop, RDFS.domain), g.value(prop, RDFS.range)) if n in nodes)
+    if neighbors:
+        for n in focus & nodes:
+            keep.update(o for o in g.objects(n) if o in nodes)
+            keep.update(s for s in g.subjects(object=n) if s in nodes)
+            # Schema relations: the class at the other end of a property n is the domain or range of.
+            for prop in object_properties:
+                ends = (g.value(prop, RDFS.domain), g.value(prop, RDFS.range))
+                if n in ends:
+                    keep.update(e for e in ends if e in nodes)
+
+    def keeps(s, p, o) -> bool:
+        return isinstance(o, Literal) or o in keep or p in (RDF.type, _EXTRACTED_FROM)
+
+    sub = Graph()
+    for prefix, ns in g.namespaces():
+        sub.bind(prefix, ns)
+    used_properties = set(focus & properties)
+    for s, p, o in g:
+        if s in keep and keeps(s, p, o):
+            sub.add((s, p, o))
+            if p in properties:
+                used_properties.add(p)
+    # Declarations of the properties drawn as edges — instance assertions above,
+    # or a schema domain -> range edge between two kept classes.
+    for prop in properties:
+        if prop in used_properties or (g.value(prop, RDFS.domain) in keep and g.value(prop, RDFS.range) in keep):
+            for p, o in g.predicate_objects(prop):
+                if keeps(prop, p, o):
+                    sub.add((prop, p, o))
+    return sub.serialize(format="turtle"), {str(u) for u in focus}
+
+
+def build_pyvis_html(
+    ttl: str,
+    output_path: str,
+    *,
+    show_physics_controls: bool = True,
+    highlight: Collection[str] = (),
+) -> str:
+    """Parse ``ttl`` and render a navigable pyvis graph to ``output_path``.
+
+    Nodes: ``owl:Class`` and ``owl:NamedIndividual`` subjects, labeled via
+    ``rdfs:label`` (falling back to the URI's local name). Edges:
+    ``rdfs:subClassOf`` (hierarchy) and any user-declared ``owl:ObjectProperty``
+    relation between two such nodes. Datatype property values, comments, and
+    any ``urn:olaf:extractedFrom`` source-chunk link(s) are folded into the
+    subject node's tooltip instead of becoming separate nodes.
+
+    ``show_physics_controls`` toggles vis-network's built-in physics-tuning
+    panel (sliders for gravity/spring length/etc.) below the graph — on by
+    default, off for the Ontology Explorer page.
+
+    Nodes whose URI is in ``highlight`` get a thick :data:`HIGHLIGHT_COLOR`
+    border and a larger size.
+    """
+    g = Graph()
+    g.parse(data=ttl, format="turtle")
+    classes, individuals, object_properties, datatype_properties = _classify(g)
     nodes = classes | individuals
 
     # Fold definitions, datatype property values, comments, and source chunk(s) into each
@@ -169,8 +251,12 @@ def build_pyvis_html(ttl: str, output_path: str, *, show_physics_controls: bool 
     for n in nodes:
         color = CLASS_COLOR if n in classes else INDIVIDUAL_COLOR
         title = html.escape("\n".join(tooltips[n]) or _label(g, n))
-        net.add_node(str(n), label=_label(g, n), title=title, color=color,
-                     shape="ellipse" if n in classes else "dot")
+        style = (
+            {"color": {"background": color, "border": HIGHLIGHT_COLOR}, "borderWidth": 4, "size": 18}
+            if str(n) in highlight else {"color": color}
+        )
+        net.add_node(str(n), label=_label(g, n), title=title,
+                     shape="ellipse" if n in classes else "dot", **style)
 
     edges_added: set[tuple[str, str, str]] = set()
 
