@@ -30,6 +30,12 @@ CogMaps is a sophisticated knowledge management and exploration application buil
    - 2D PCA map coloured by cluster + pie-chart of cluster distribution.
    - Near-duplicate detection: only document pairs with cosine similarity ≥ 0.99 are surfaced, each flagged as **near-duplicate** and ranked by descending score.
 
+5. **Ontology Building & Exploration (`/build ontology/`, `/explore ontology/`)**
+   - Builds an OWL/RDFS ontology from documents already in Qdrant: a Nebius tool-calling agent drives [OLAF](https://github.com/merlin-intelligence/olaf) (MCP server) and stores the triples in **Oxigraph** (RDF triplestore, via Docker).
+   - Background jobs, like ingestion — an interrupted build can be re-launched and resumes where it stopped (processed chunks are skipped).
+   - Optional **domain discovery**: a per-collection *domain blueprint* (inferred domain + taxonomical pillars), synthesized from a corpus sample or written by hand, tailors the agent's prompt. Opt-in per build.
+   - Read-only explorer: browse every ontology stored in Oxigraph as a graph or raw Turtle, and run SPARQL queries.
+
 ## Stability & Performance
 
 - **Shared Model Cache**: The embedding model is loaded once on first use, kept resident via `@st.cache_resource` — a single ~300 MB copy is reused across all sessions **and background ingestion jobs** (no per-job reload), with concurrent calls serialized internally so ingestion and chat/analysis never race for the same model instance.
@@ -57,10 +63,12 @@ cogmaps/                      importable package
 ├── connectors/                Google Drive, SharePoint
 ├── pipelines/                 ingestion orchestration (Ingester)
 ├── jobs/                       async ingestion job system (SQLite store + daemon runner)
+├── ontology/                   ontology building — OLAF/MCP agent loop, build job runner,
+│                             domain discovery, Oxigraph client, graph view, cleanup
 └── ui/                          Streamlit-only code (auth, components, styles)
 
 streamlit_app.py            entry point — `streamlit run streamlit_app.py`
-pages/                      Streamlit multipage navigation (/add files to your corpus/, /analyze corpus/, /ask/, /navigate your experience/, /manage/)
+pages/                      Streamlit multipage navigation (/add files to your corpus/, /analyze corpus/, /ask/, /navigate your experience/, /explore ontology/, /build ontology/, /manage/)
 scripts/ingest_recursive.py CLI ingestion (also exposed as `cogmaps-ingest`)
 tests/unit/                 unit tests (app-level; pure graph-math tests live in the eigenmind package)
 ```
@@ -70,10 +78,11 @@ Lovász θ diversity, `SimilarityGraph`) are published separately as the
 [`eigenmind`](https://github.com/merlin-intelligence/eigenmind) package and
 pulled in as a regular dependency of `cogmaps/graph/` (see `pyproject.toml` / `requirements.txt`).
 
-Run the app:
+Run the app (`QDRANT_API_KEY` must be set in `.env` first):
 
 ```bash
 pip install -e .
+docker compose up -d          # Qdrant + Oxigraph
 streamlit run streamlit_app.py
 ```
 

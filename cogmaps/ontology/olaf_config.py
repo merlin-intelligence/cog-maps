@@ -10,9 +10,19 @@ written to that job's temp directory.
 """
 from __future__ import annotations
 
+import logging
 import re
+import urllib.error
+import urllib.request
 
-from cogmaps.config import USER_DATA_DIR
+from rdflib import OWL, RDF, Graph
+
+from cogmaps.config import EMBEDDING_MODEL_NAME, USER_DATA_DIR
+from cogmaps.config import oxigraph_url as default_oxigraph_url
+
+logger = logging.getLogger(__name__)
+
+_ONTOLOGY_TYPES = (OWL.Class, OWL.ObjectProperty, OWL.DatatypeProperty, OWL.NamedIndividual)
 
 _ONTOLOGY_ID_RE = re.compile(r"[^a-z0-9_]+")
 
@@ -42,6 +52,49 @@ def ttl_path_for(collection: str) -> str:
     collection name as the ownership boundary.
     """
     return str(USER_DATA_DIR / "ontology" / f"{collection}.ttl")
+
+
+def has_ontology_content(ttl: str | None) -> bool:
+    """True if ``ttl`` parses as Turtle and declares at least one class, property or individual.
+
+    Used to decide whether an export is worth persisting, instead of
+    substring checks that miss prefix-less or differently-formatted Turtle.
+    """
+    if not ttl or not ttl.strip():
+        return False
+    g = Graph()
+    try:
+        g.parse(data=ttl, format="turtle")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Ontology export is not valid Turtle: %s", e)
+        return False
+    return any(next(g.subjects(RDF.type, t), None) is not None for t in _ONTOLOGY_TYPES)
+
+
+def export_oxigraph_ontology_ttl(
+    ontology_id: str, oxigraph_url: str | None = None, *, timeout: float = 10,
+) -> str | None:
+    """Fetch the Turtle representation of an ontology's named graph directly from Oxigraph.
+
+    Bypasses seed graphs and guarantees returning the current state in the graph store.
+    Returns None if the graph is missing or Oxigraph is unreachable.
+    """
+    endpoint = (oxigraph_url or default_oxigraph_url()).rstrip("/")
+    url = f"{endpoint}/store?graph=urn:olaf:{ontology_id}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "text/turtle"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            logger.debug("No Oxigraph graph urn:olaf:%s yet", ontology_id)
+        else:
+            logger.warning("Oxigraph export of urn:olaf:%s failed: HTTP %s", ontology_id, e.code)
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Oxigraph export of urn:olaf:%s failed: %s", ontology_id, e)
+        return None
+    return data if data.strip() else None
 
 
 def build_config_toml(
@@ -86,6 +139,7 @@ name        = "{ontology_name}"
 ontology_id = "{ontology_id}"
 
 [embedding]
-model   = "intfloat/multilingual-e5-small"
+# Not in fastembed's catalog — registered by cogmaps.ontology.olaf_launcher.
+model   = "{EMBEDDING_MODEL_NAME}"
 enabled = true
 '''

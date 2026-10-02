@@ -74,3 +74,60 @@ def test_build_pyvis_html_handles_empty_ontology(tmp_path):
     out = tmp_path / "empty.html"
     build_pyvis_html("", str(out))
     assert out.exists()
+
+
+def test_build_pyvis_html_renders_schema_domain_range_edges_and_external_parents(tmp_path):
+    ttl = """
+    @prefix : <http://olaf.local/ontology#> .
+    @prefix seed: <http://example.org/ontology#> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+    @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+    :TreasuryBond a owl:Class ;
+        rdfs:label "Treasury Bond" ;
+        skos:definition "A sovereign bond issued by the Treasury." ;
+        skos:altLabel "T-Bond" ;
+        rdfs:subClassOf seed:Asset .
+
+    :Yield a owl:Class ;
+        rdfs:label "Yield" .
+
+    :hasYield a owl:ObjectProperty ;
+        rdfs:label "hasYield" ;
+        rdfs:domain :TreasuryBond ;
+        rdfs:range :Yield .
+    """
+    out = tmp_path / "schema_graph.html"
+    build_pyvis_html(ttl, str(out))
+    content = out.read_text(encoding="utf-8")
+
+    # Parent seed class should be included as a node
+    assert "Asset" in content
+    assert "Treasury Bond" in content
+    assert "Yield" in content
+
+    # Schema-level domain/range edge and subClassOf edge should exist
+    assert "hasYield" in content
+    assert "subClassOf" in content
+
+    # SKOS definition and alt label should appear in tooltip
+    assert "A sovereign bond issued by the Treasury." in content
+    assert "alt: T-Bond" in content
+
+
+def test_build_pyvis_html_does_not_draw_owl_thing_as_a_node(tmp_path):
+    ttl = """
+    @prefix : <http://olaf.local/ontology#> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+    :Root a owl:Class ; rdfs:label "Root" ; rdfs:subClassOf owl:Thing .
+    :rel a owl:ObjectProperty ; rdfs:label "rel" ; rdfs:domain :Root ; rdfs:range rdfs:Resource .
+    """
+    out = tmp_path / "builtins.html"
+    build_pyvis_html(ttl, str(out))
+    content = out.read_text(encoding="utf-8")
+    assert "Root" in content
+    assert "owl#Thing" not in content
+    assert "rdf-schema#Resource" not in content

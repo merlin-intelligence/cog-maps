@@ -15,7 +15,7 @@
 ## Prerequisites
 
 1.  **Python 3.10+** installed.
-2.  **Docker** and **Docker Compose** installed (for Qdrant).
+2.  **Docker** and the **Docker Compose** plugin installed (for Qdrant and Oxigraph). On WSL2, Docker Engine installed directly in the Linux distribution works as well as Docker Desktop.
 3.  **Tesseract OCR** (Optional, but recommended for processing scanned PDFs). OCR runs through ChunkNorris/PyMuPDF's integrated Tesseract — install the system Tesseract package and point `TESSDATA_PREFIX` at its `*.traineddata` files; no extra Python packages are required.
 
 ---
@@ -78,6 +78,9 @@ QDRANT_API_KEY=your_generated_qdrant_api_key_here
 # Optional: cap on documents loaded by /analyze corpus/ on a large collection
 # — above this, a random sample is analyzed instead to bound memory use (default 3000)
 # MAX_ANALYSIS_DOCUMENTS=3000
+# Optional: domain discovery on /build ontology/ (see Step 4)
+# DOMAIN_DISCOVERY_MODEL=zai-org/GLM-5.3-Flash
+# DOMAIN_PROFILES_DIR=user_data/ontology/domain_profiles
 # HF_TOKEN=...   # only if you need a gated local LLM
 ```
 
@@ -99,7 +102,11 @@ alice = "alice_password"
 bob   = "bob_password"
 ```
 
-When both sources are present, `st.secrets` takes precedence over `.env`.
+When both sources are present, `st.secrets` takes precedence over `.env` — with one
+exception: the background ontology jobs (domain discovery, build agent) resolve
+`NEBIUS_API_KEY` through `cogmaps.config.nebius_api_key()`, which reads the
+environment first and only falls back to `st.secrets` when the variable is unset.
+Keep both values identical if you define the key in both places.
 
 > **`QDRANT_API_KEY` always needs a `.env` file**, even if you pick Option B for
 > the app's own secrets — `docker-compose.yml` reads it directly via shell/`.env`
@@ -161,6 +168,8 @@ OLLAMA_HOST=http://localhost:11434   # default; override if Ollama runs elsewher
 # OLLAMA_MODELS=qwen2.5:7b           # optional fallback list if the server can't be queried
 ```
 
+With **Nebius**, an answer is capped at `CHAT_MAX_TOKENS` tokens (default 8192). Reasoning models (GLM, Kimi, gpt-oss) count their hidden reasoning against that budget — raise it in `.env` if answers come back truncated. Only the final answer is shown, with either backend: reasoning returned in a separate field is logged at `DEBUG` level, and inline `<think>…</think>` blocks (DeepSeek-R1, Qwen3… on Ollama) are stripped.
+
 When **Ollama** is selected, the model dropdown is populated automatically from the models installed on the server (`ollama list`). Pull at least one first, e.g. `ollama pull qwen2.5:7b`, and make sure the server is running (`ollama serve`).
 
 *Note for Google Drive*: Upload your `client_secrets.json` or `service_account.json` directly through the app interface when prompted. The OAuth token is then cached at `user_data/<user>/gdrive_token.json`.
@@ -170,8 +179,10 @@ When **Ollama** is selected, the model dropdown is populated automatically from 
 `QDRANT_API_KEY` must already be set in `.env` (Step 3) — Qdrant refuses to start without it. The application expects Qdrant to be accessible at `localhost:6333`. Launch it using the provided Docker Compose file:
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
+
+(With the legacy standalone binary, the command is `docker-compose up -d`.) Useful follow-ups: `docker compose ps`, `docker compose logs -f qdrant`, and `docker compose down` to stop the containers — data stays in the named volumes.
 
 This starts both `qdrant` and `oxigraph` (the RDF triplestore behind `/build ontology/`, see below) in the background. Vectors are stored persistently in the named Docker volume `qdrant_storage` (declared in `docker-compose.yml`) — not a plain folder in the repo. To back it up:
 
@@ -187,14 +198,30 @@ This page builds an OWL/RDFS ontology from a corpus already in Qdrant, using
 ontology-CRUD tools) driven by a tool-calling LLM agent.
 
 - **Oxigraph** — the RDF triplestore that stores the ontology triples. Runs
-  as the `oxigraph` service in `docker-compose.yml` (started by `docker-compose up -d`
+  as the `oxigraph` service in `docker-compose.yml` (started by `docker compose up -d`
   above), bound to `127.0.0.1:7878`. Override its URL with `OXIGRAPH_URL` in `.env`.
 - **OLAF** — installed as a regular Python dependency (`pip install -e .`
   pulls it from `git+https://github.com/merlin-intelligence/olaf.git`). There
   is no standalone OLAF server to run: `cogmaps.ontology.runner.OntologyJobRunner`
-  spawns a fresh `olaf` **stdio subprocess per build job**, with a `config.toml`
+  spawns a fresh OLAF **stdio subprocess per build job**, with a `config.toml`
   generated on the fly (Qdrant collection, field mapping, Oxigraph URL,
   ontology id derived from the collection name).
+- **Concept embeddings** — OLAF embeds every concept it creates (into the
+  `olaf_concepts_{id}` Qdrant collection) for semantic search and
+  deduplication, using **fastembed**. CogMaps makes it use the same model as
+  the corpus, `intfloat/multilingual-e5-base`, even though that model is not
+  in fastembed's catalog: the subprocess is started as
+  `python -m cogmaps.ontology.olaf_launcher` rather than the `olaf` console
+  script, and the launcher registers the model's ONNX export
+  (`onnx/model.onnx` in its Hugging Face repo, mean pooling + normalization)
+  with `TextEmbedding.add_custom_model` before handing over to OLAF. The
+  first build downloads that export (~1.1 GB) into `~/.cache/fastembed`
+  (override with `FASTEMBED_CACHE_PATH`; fastembed's own default, under
+  `/tmp`, would be wiped on reboot), and each build process holds its own copy of the model in
+  memory — it can't share the Streamlit process's one. OLAF only embeds a
+  concept when it *creates* it: concepts created while embedding was broken
+  (e.g. before this launcher existed) stay unindexed, and re-running the
+  build won't fix them — delete the ontology from `/manage/` and rebuild.
 - **Qdrant authentication** — CogMaps' Qdrant requires `QDRANT_API_KEY`
   (Step 3), which [OLAF](https://github.com/merlin-intelligence/olaf)
   supports via `[qdrant].api_key` in `config.toml` (or the `QDRANT_API_KEY`
@@ -237,6 +264,60 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   dedup/reuse path — is a no-op, so a chunk that merely confirms an existing
   concept never gets recorded as an additional source), and `property_create`
   / `relation_add` have no provenance parameter at all.
+- **Chunk status in Qdrant** — OLAF tracks progress through an `olaf_status`
+  payload field on each chunk, but only writes it when a chunk is marked
+  processed, while `chunk_list(status="pending")` filters on that value. Before
+  every build, `cogmaps.ontology.runner.init_pending_chunks` therefore tags the
+  selected documents' never-processed chunks with `olaf_status="pending"`
+  (chunks already processed are left untouched). **A build does write to the
+  source Qdrant collection** — this payload field only, never the text or
+  vectors.
+- **When the agent stops** — the model saying it is done is not enough: the
+  loop only ends once OLAF's `chunk_list` confirms no selected chunk is still
+  pending. Otherwise the agent is nudged to continue, up to
+  `MAX_CONSECUTIVE_NUDGES` (3) times in a row, then the job stops and the log
+  lists the documents with pending chunks. **Re-launching the build resumes
+  where it stopped** — processed chunks are skipped. The 150-iteration cap
+  (`MAX_ITERATIONS`) still applies.
+- **Context compaction** — to keep long builds within the model's context,
+  tool results older than the 12 most recent are cut down to a short preview
+  once they exceed 1,500 characters (chunk texts and bulk listings are the
+  main culprits). The agent can call the tool again if it needs the full
+  result. Tunables live at the top of `cogmaps/ontology/agent.py`.
+- **Export** — intermediate `ontology_export` calls only overwrite the cached
+  `.ttl` when they exclude seeds and actually declare at least one class,
+  property or individual (checked by parsing the Turtle with `rdflib`). At the
+  end of every job a final export (seeds excluded) is guaranteed: if OLAF's
+  export fails or comes back empty, the named graph is read straight from
+  Oxigraph instead. The graph view never draws OWL/RDF/RDFS vocabulary terms
+  (`owl:Thing`, `rdfs:Resource`…) as nodes.
+
+#### Domain discovery (optional)
+
+A *domain blueprint* tailors the build agent's system prompt to the corpus: an
+inferred domain, its epistemological nature (empirical, deontic,
+interdisciplinary…), and a list of *pillars* — taxonomical dimensions, each
+with a target OWL parent class, 8–12 candidate concepts and typical relations.
+
+- **Opt-in per build** — tick **use domain discovery** before launching a
+  build (unticked by default). Unticked, the default prompt is used and no
+  discovery call is made. Ticked, the collection's cached blueprint is used;
+  if there is none, one is synthesized at launch. If synthesis fails, the
+  build continues with the default prompt.
+- **Discovery** — `cogmaps.ontology.domain_discovery` samples one random
+  chunk per document (up to 15 documents, 500 characters each) from Qdrant
+  and asks a Nebius model to synthesize the blueprint. The model is
+  `DOMAIN_DISCOVERY_MODEL` (default `zai-org/GLM-5.3-Flash`); `NEBIUS_API_KEY`
+  is required. Excerpts are random, so two discoveries on the same
+  collection can differ.
+- **Editing** — the **🧬 Domain discovery** section of `/build ontology/` lets
+  you run discovery (**🔍 discover** / **↻ re-discover**), create a blueprint
+  by hand, and review or edit it through three tabs: *Overview*, *Form
+  Editor* (domain, pillars, add/remove pillars) and *Raw JSON*.
+- **Storage** — blueprints are cached as one JSON file per collection under
+  `DOMAIN_PROFILES_DIR` (default `user_data/ontology/domain_profiles/`). A
+  collection's blueprint is removed along with its ontology or the collection
+  itself by the `/manage/` cleanup actions below.
 
 ### Ontology Explorer (`/explore ontology/`)
 
@@ -257,11 +338,13 @@ config-generation approach as a build job):
 
 - **Delete entire collection** cascades to delete that collection's ontology
   too (Oxigraph graph via `olaf drop <id>`, its `olaf_concepts_{id}` Qdrant
-  collection, and the cached `.ttl` export) — a warning is shown before
-  confirming. **This never goes the other way**: deleting an ontology alone
+  collection, the cached `.ttl` export and the domain blueprint) — a warning
+  is shown before confirming. The blueprint is removed even when no ontology
+  was ever built for the collection. **This never goes the other way**: deleting an ontology alone
   never touches the Qdrant collection it was built from.
 - **Delete ontology only** — the same cleanup, without touching the
-  collection.
+  collection. The domain blueprint goes too: export it from the *Raw JSON*
+  tab first if you want to rebuild with the same one.
 - **Delete seed ontologies** (admin-only) — seeds are global, shared across
   every ontology in the store, so this section is independent of the
   collection selected above. Runs `olaf drop-seed <id>`.
@@ -272,6 +355,7 @@ Eigenmind is optimized to run on resource-constrained environments (e.g., 4GB RA
 
 ### 1. Memory Management
 - **Shared Model Cache**: The SentenceTransformer is loaded once on first use via `@st.cache_resource` (see `get_embedder()` in `cogmaps/ui/components.py`) and kept resident in the Streamlit server process. The same ~300 MB instance is reused across **all sessions and all users** for search, analysis, **and background ingestion jobs** — no per-request reload, no per-job copy, so a running ingestion never doubles GPU/CPU memory usage against a concurrent chat session. Concurrent calls into the shared instance are serialized internally (a `threading.Lock` around `encode*`), so ingestion and chat queue up rather than racing. The cache is released only when the process exits (e.g. `systemctl restart cogmaps`).
+- **Ontology builds**: each `/build ontology/` job runs OLAF in its own subprocess, which loads a second copy of the embedding model (ONNX, ~1.1 GB) for the duration of the build — budget for it on small VMs.
 - **CLI Ingestion**: The `cogmaps-ingest` CLI is a separate, single-run process and still uses its own scoped `EmbeddingModel` (loaded at start, released at exit via `with EmbeddingModel(...)`) — there's no long-lived cache to share outside the Streamlit process.
 - **CPU-First**: By default, the app uses CPU-only PyTorch to ensure stability and avoid GPU-related memory overhead on low-end systems. CUDA / MPS are auto-detected when available.
 

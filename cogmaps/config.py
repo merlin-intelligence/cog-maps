@@ -53,6 +53,8 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 # "moonshotai/Kimi-K2.5-fast" (404, renamed) started failing. Nebius's catalog
 # changes over time — re-verify the same way if a model here starts failing.
 NEBIUS_MODELS = (
+    "zai-org/GLM-5.3",
+    "zai-org/GLM-5.3-Flash",
     "moonshotai/Kimi-K2.6",
     "openai/gpt-oss-120b",
     "deepseek-ai/DeepSeek-V4-Pro",
@@ -64,9 +66,13 @@ NEBIUS_MODELS = (
 # A distinct (not aliased) tuple from NEBIUS_MODELS: tool-calling capability
 # matters here specifically, general chat quality doesn't need the same bar.
 ONTOLOGY_TOOLCALL_MODELS = (
-    "openai/gpt-oss-120b",
+    "zai-org/GLM-5.3",
+    "zai-org/GLM-5.3-Flash",
     "moonshotai/Kimi-K2.6",
+    "openai/gpt-oss-120b",
 )
+DEFAULT_DOMAIN_DISCOVERY_MODEL = "zai-org/GLM-5.3-Flash"
+DOMAIN_PROFILES_DIR = os.path.join("user_data", "ontology", "domain_profiles")
 DEFAULT_OXIGRAPH_URL = "http://localhost:7878"
 
 # ── Visualization ──
@@ -155,9 +161,36 @@ def max_analysis_documents() -> int:
     return _int_env("MAX_ANALYSIS_DOCUMENTS", 3000)
 
 
+def chat_max_tokens() -> int:
+    """Token budget for one /ask/ answer from Nebius (``CHAT_MAX_TOKENS``, default 8192).
+
+    Reasoning models spend part of it thinking before they answer, so a low
+    cap truncates long answers or leaves no room for the answer at all.
+    """
+    return _int_env("CHAT_MAX_TOKENS", 8192)
+
+
 def nebius_api_key() -> str:
-    """Nebius / AI Hub API key from env (or empty string if not set)."""
-    return os.getenv("NEBIUS_API_KEY", "").strip()
+    """Nebius / AI Hub API key from env or st.secrets (or empty string if not set)."""
+    key = os.getenv("NEBIUS_API_KEY", "").strip()
+    if not key:
+        try:
+            import streamlit as st
+            if "NEBIUS_API_KEY" in st.secrets:
+                return str(st.secrets["NEBIUS_API_KEY"]).strip()
+        except Exception:
+            pass
+    return key
+
+
+def domain_discovery_model() -> str:
+    """Model used for domain discovery synthesis (fast, high throughput)."""
+    return os.getenv("DOMAIN_DISCOVERY_MODEL", DEFAULT_DOMAIN_DISCOVERY_MODEL).strip() or DEFAULT_DOMAIN_DISCOVERY_MODEL
+
+
+def domain_profiles_dir() -> str:
+    """Directory where cached domain blueprint profiles are persisted."""
+    return os.getenv("DOMAIN_PROFILES_DIR", DOMAIN_PROFILES_DIR).strip() or DOMAIN_PROFILES_DIR
 
 
 def llm_provider() -> str:

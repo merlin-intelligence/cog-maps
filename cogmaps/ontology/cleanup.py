@@ -16,7 +16,8 @@ subprocesses, the same way :mod:`cogmaps.ontology.runner` spawns ``olaf`` for
 a build job. ``olaf drop`` only touches Oxigraph, not the
 ``olaf_concepts_{id}`` Qdrant collection it created for semantic search —
 that one, and the locally cached Turtle export, are cleaned up here
-directly. ``olaf drop-seed`` has no Qdrant-side data to clean up (no
+directly, along with the collection's cached domain blueprint (see
+:mod:`cogmaps.ontology.domain_discovery`). ``olaf drop-seed`` has no Qdrant-side data to clean up (no
 concepts collection is ever created for a seed).
 """
 from __future__ import annotations
@@ -29,6 +30,7 @@ from contextlib import contextmanager
 
 from cogmaps.config import oxigraph_url as cfg_oxigraph_url
 from cogmaps.config import qdrant_api_key as cfg_qdrant_api_key
+from cogmaps.ontology.domain_discovery import delete_blueprint
 from cogmaps.ontology.olaf_config import (
     CONCEPTS_COLLECTION_PREFIX,
     build_config_toml,
@@ -90,7 +92,7 @@ def ontology_exists_for(collection: str) -> bool:
 
 
 def delete_ontology_for_collection(collection: str, qdrant_host: str, qdrant_port: int) -> list[str]:
-    """Drop the Oxigraph ontology graph + its concepts Qdrant collection + cached .ttl export.
+    """Drop the Oxigraph ontology graph + its concepts Qdrant collection + cached .ttl export + domain blueprint.
 
     Returns human-readable status lines for each step actually performed.
     Raises ``RuntimeError`` if the ``olaf drop`` subprocess itself fails.
@@ -115,6 +117,9 @@ def delete_ontology_for_collection(collection: str, qdrant_host: str, qdrant_por
     if os.path.exists(ttl_file):
         os.remove(ttl_file)
         messages.append("Cached Turtle export removed.")
+
+    if delete_blueprint(collection):
+        messages.append("Domain blueprint removed.")
 
     return messages
 

@@ -15,15 +15,76 @@ import shutil
 import tempfile
 import threading
 import traceback
+from collections.abc import Callable
 
-from cogmaps.config import nebius_api_key, oxigraph_url, qdrant_api_key
+from qdrant_client import models
+
+from cogmaps.config import domain_discovery_model, nebius_api_key, oxigraph_url, qdrant_api_key
 from cogmaps.ontology.agent import run_build
+from cogmaps.ontology.domain_discovery import discover_domain, load_blueprint
 from cogmaps.ontology.mcp_client import olaf_session
-from cogmaps.ontology.olaf_config import build_config_toml, ttl_path_for
+from cogmaps.ontology.olaf_config import (
+    build_config_toml,
+    export_oxigraph_ontology_ttl,
+    has_ontology_content,
+    ttl_path_for,
+)
 from cogmaps.ontology.store import OntologyJobStore
+from cogmaps.qdrant.store import QdrantStore
 from cogmaps.rag.llm_clients import resolve_nebius_endpoint
 
-__all__ = ["OntologyJobRunner", "ttl_path_for"]
+__all__ = ["OntologyJobRunner", "final_export", "ttl_path_for"]
+
+
+# OLAF's chunk-status payload field (``olaf.chunks._STATUS_FIELD``).
+OLAF_STATUS_FIELD = "olaf_status"
+
+
+def init_pending_chunks(client, collection: str, doc_filenames: list[str]) -> None:
+    """Tag the requested documents' never-processed chunks as ``olaf_status="pending"``.
+
+    OLAF only writes this field when a chunk is marked processed, but its
+    ``chunk_list(status="pending")`` filters on the field's value — so on a
+    fresh collection it returns nothing and the agent believes there is no
+    work left. Chunks already marked processed are left untouched.
+    """
+    must: list = [models.IsEmptyCondition(is_empty=models.PayloadField(key=OLAF_STATUS_FIELD))]
+    if doc_filenames:
+        must.append(models.FieldCondition(key="filename", match=models.MatchAny(any=list(doc_filenames))))
+    client.set_payload(
+        collection_name=collection,
+        payload={OLAF_STATUS_FIELD: "pending"},
+        points=models.FilterSelector(filter=models.Filter(must=must)),
+        wait=True,
+    )
+
+
+async def final_export(
+    session,
+    ontology_id: str,
+    *,
+    export_cb: Callable[[str], None],
+    log: Callable[[str], None],
+) -> None:
+    """Guaranteed final export of the active ontology (excluding global seeds).
+
+    Asks OLAF for the export first; if that fails or looks empty, falls back
+    to reading the named graph straight from Oxigraph.
+    """
+    try:
+        res = await session.call_tool("ontology_export", {"include_seeds": False})
+        content = res.content[0].text if res.content else ""
+        if has_ontology_content(content):
+            export_cb(content)
+            log("Final ontology exported successfully.")
+            return
+        raise ValueError("Session export returned empty or incomplete content")
+    except Exception as ex:  # noqa: BLE001
+        log(f"Final session export fallback: querying Oxigraph directly ({ex})...")
+        direct_ttl = export_oxigraph_ontology_ttl(ontology_id, oxigraph_url())
+        if direct_ttl:
+            export_cb(direct_ttl)
+            log("Final ontology exported via direct Oxigraph connection.")
 
 
 class OntologyJobRunner:
@@ -94,6 +155,33 @@ class OntologyJobRunner:
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(turtle)
 
+            # ── Domain discovery (optional, opted into per job) ──
+            blueprint = None
+            if job["use_domain_discovery"]:
+                log(f"Domain discovery: resolving domain blueprint for collection {collection!r}...")
+                blueprint = load_blueprint(collection)
+                if blueprint is None:
+                    discovery_model = domain_discovery_model()
+                    log(f"Domain discovery: no cached blueprint found, synthesizing one with {discovery_model}...")
+                    try:
+                        store = QdrantStore(self.qdrant_host, self.qdrant_port)
+                        blueprint = discover_domain(store, collection, model=discovery_model)
+                        log(
+                            f"Domain discovery: completed -> '{blueprint.inferred_domain}' "
+                            f"({blueprint.epistemological_nature}) with {len(blueprint.pillars)} taxonomical pillars."
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log(f"Domain discovery warning: failed ({e}), proceeding with default prompt.")
+                        blueprint = None
+                else:
+                    log(f"Domain discovery: loaded cached blueprint -> '{blueprint.inferred_domain}' ({len(blueprint.pillars)} pillars).")
+            else:
+                log("Domain discovery disabled for this build — using the default prompt.")
+
+            init_pending_chunks(
+                QdrantStore(self.qdrant_host, self.qdrant_port).client, collection, job["doc_filenames"]
+            )
+
             log(f"Starting OLAF (collection={collection!r}, ontology_id={job['ontology_id']!r})")
             async with olaf_session(config_dir) as session:
                 await run_build(
@@ -105,7 +193,9 @@ class OntologyJobRunner:
                     log=log,
                     set_progress=set_progress,
                     export_cb=export_cb,
+                    blueprint=blueprint,
                 )
+                await final_export(session, job["ontology_id"], export_cb=export_cb, log=log)
             self.store.set_status(job_id, "done")
             log("Ontology build complete.")
         except Exception as e:  # noqa: BLE001

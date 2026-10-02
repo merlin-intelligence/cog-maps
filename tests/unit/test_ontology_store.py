@@ -114,3 +114,46 @@ def test_startup_marks_interrupted_jobs_failed(tmp_path):
     assert store2.get_job("was-running")["status"] == "failed"
     assert store2.get_job("was-pending")["status"] == "failed"
     assert store2.get_job("was-done")["status"] == "done"  # untouched
+
+
+def test_use_domain_discovery_defaults_to_false(tmp_path):
+    store = _store(tmp_path)
+    _create(store, "j1")
+    assert store.get_job("j1")["use_domain_discovery"] is False
+
+
+def test_use_domain_discovery_round_trips(tmp_path):
+    store = _store(tmp_path)
+    store.create_job(
+        job_id="j1", collection="col", ontology_id="main",
+        doc_filenames=["a.pdf"], llm_provider="nebius", llm_model="m",
+        use_domain_discovery=True,
+    )
+    assert store.get_job("j1")["use_domain_discovery"] is True
+    assert store.latest_job_for("col")["use_domain_discovery"] is True
+
+
+def test_existing_db_without_discovery_column_is_migrated(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "ontology_jobs.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """CREATE TABLE ontology_jobs (
+            id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending',
+            collection TEXT NOT NULL, ontology_id TEXT NOT NULL,
+            doc_filenames_json TEXT NOT NULL, llm_provider TEXT NOT NULL,
+            llm_model TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO ontology_jobs VALUES ('old', 'done', 'col', 'main', '[]', 'nebius', 'm', 't', 't', 0, 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = OntologyJobStore(str(db))
+    assert store.get_job("old")["use_domain_discovery"] is False
+    _create(store, "new")
+    assert store.get_job("new")["use_domain_discovery"] is False

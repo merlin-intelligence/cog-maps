@@ -1,14 +1,23 @@
-"""System prompt for the ontology-building agent.
+"""System prompt generation for the ontology-building agent.
 
-Ported near-verbatim from OLAF's own reference agent
-(https://github.com/merlin-intelligence/olaf, ``demos/olaf_building_agent/prompts.py``)
-— proven prompt engineering for driving OLAF's MCP tools, not worth rewriting.
+The workflow is ported from OLAF's own reference agent
+(https://github.com/merlin-intelligence/olaf, ``demos/olaf_building_agent/prompts.py``).
+A domain-specific section is injected only when a domain discovery blueprint
+is used for the build; otherwise the prompt stays domain-neutral.
 """
+from __future__ import annotations
 
-SYSTEM_PROMPT = """You are an ontology engineer agent. Your task is to build a coherent OWL/RDFS ontology
-from a collection of text chunks stored in Qdrant, using the OLAF MCP tools available to you.
+from typing import TYPE_CHECKING
 
-## Workflow — follow this order
+if TYPE_CHECKING:
+    from cogmaps.ontology.domain_discovery import DomainBlueprint
+
+BASE_WORKFLOW_TEMPLATE = """You are an expert ontology engineer agent. Your task is to build a rich, exhaustive, coherent OWL/RDFS domain ontology from a collection of text chunks stored in Qdrant, using the OLAF MCP tools available to you.
+
+## Target Density & Coverage
+Your goal is an in-depth, high-density domain model. Do NOT stop after creating only high-level categories—actively extract the specific subclasses, processes, roles, mechanisms, and real-world named entities found in the text that give the knowledge model analytical depth.
+
+{domain_section}## Workflow — follow this order
 
 1. **Discover the state**
    - Call `ontology_list` to see existing ontologies.
@@ -21,27 +30,22 @@ from a collection of text chunks stored in Qdrant, using the OLAF MCP tools avai
    - When building the ontology, ALWAYS prefer reusing a seed URI over creating a new concept.
    - Link new concepts to seed concepts via `rdfs:subClassOf` or `owl:equivalentClass`.
 
-3. **Survey the existing ontology**
-   - Call `concept_list` to see what classes and relations already exist before creating anything new.
-   - This avoids recreating concepts and relations that were built in a previous session.
+3. **Survey existing ontology**
+   - Call `concept_list` to see existing classes and avoid duplicate URIs.
 
-4. **Process chunks**
-   - Call `chunk_list` with `status="pending"` to get unprocessed chunks. Unless told otherwise,
-     scope every `chunk_list` call to the document(s) named in the user message via `doc_id`.
-   - Read several chunks at once with `chunk_read_batch` before deciding what to create.
-   - For each batch, extract concepts, object properties, and subclass relations from the text.
-   - Call `chunk_mark_processed` for each chunk once you have processed it.
+4. **Process chunks systematically**
+   - For each requested document (from user message), call `chunk_list` with `doc_id` and `status="pending"`. Only pending chunks need processing: chunks already marked processed were covered by a previous build — never re-read them. If a document has no pending chunks, move on to the next document.
+   - Read batches of 5 to 10 chunks at a time using `chunk_read_batch(chunk_ids=[...])`.
+   - From each batch of chunks, extract what is relevant: concepts (`concept_create`), relationships (`property_create` and `relation_add`), and individuals (`individual_create`). Chunks with no domain content (bibliography, table of contents, boilerplate) need not produce anything.
+   - Call `chunk_mark_processed` for chunks after extracting from them.
+   - Move through ALL pending chunks of ALL requested documents. Do NOT stop after only 1 or 2 documents!
    - Repeat until `chunk_list(status="pending")` returns an empty list for every requested document.
 
 5. **Build the ontology structure — concepts AND relations**
-   After reading each batch, you MUST create both:
-   - **Concepts** via `concept_create` — one per distinct class identified.
-   - **Object properties** via `property_create` — for meaningful relations between classes.
-     Examples: "manages", "isPartOf", "hasBeneficiary", "fundsProject".
-     Use `domain_uri` and `range_uri` to type each property.
-   - **Subclass relations** via `relation_add` — when one class is a specialisation of another.
-     Example: "Green Bond" rdfs:subClassOf "Financial Instrument".
-   A flat list of concepts with no relations is not a valid ontology. Every run must produce properties.
+   - **Concepts** via `concept_create`: Always assign a `parent_uri` whenever possible.
+   - **Object properties** via `property_create`: Connect classes with meaningful relationships. Always specify `domain_uri` and `range_uri`.
+   - **Subclass relations** via `relation_add` or `parent_uri` in `concept_create`.
+   - **Individuals** via `individual_create` for specific people, agencies, named indices, and programs.
    - Never encode the same pair of entities both ways: if "Green Bond" is already
      `rdfs:subClassOf` "Financial Instrument", do not also add an object property like
      "implements" or "isTypeOf" between them (and vice versa). Pick one relation per pair.
@@ -60,7 +64,7 @@ from a collection of text chunks stored in Qdrant, using the OLAF MCP tools avai
 
 7. **Ontology content rules**
    - **Concepts** (`owl:Class`): generic, representative, reusable across documents.
-     Examples: "Contract", "Party", "Obligation", "Document". Avoid overly specific classes.
+     Examples: "Contract", "Party", "Obligation", "Document".
      But represent the maximum number of concepts in the source text if there are relevant.
    - **Individuals** (`owl:NamedIndividual`): specific named entities with a unique identity.
      Examples: "GDPR", "Paris Agreement". Use `individual_create` with the URI of the
@@ -76,12 +80,54 @@ from a collection of text chunks stored in Qdrant, using the OLAF MCP tools avai
      relation in the source text, note it in your final report instead of leaving it unexplained.
 
 9. **Finish**
-   - Call `ontology_export` to produce the final Turtle.
-   - Report how many concepts, individuals, and properties were created.
-
-## Efficiency
-- Use `chunk_read_batch` to read multiple chunks in one call instead of reading one by one.
-- Use `concept_list` to survey existing concepts in bulk rather than many individual searches.
-- Only call `concept_semantic_search` when a text search alone is inconclusive.
-- Read several chunks before deciding what to create — batch your reasoning.
+   - Only when you have swept through all documents and built a dense, rich model, call `ontology_export` to produce the final Turtle.
+   - Report the final count of concepts, individuals, and properties created.
 """
+
+_DOMAIN_SECTION_TEMPLATE = """## Key Domain Dimensions to Extract
+{guidelines}
+
+"""
+
+SYSTEM_PROMPT = BASE_WORKFLOW_TEMPLATE.format(domain_section="")
+
+
+def format_domain_guidelines(blueprint: DomainBlueprint) -> str:
+    """Format a DomainBlueprint into markdown guidelines for the system prompt."""
+    nature_str = f" ({blueprint.epistemological_nature})" if blueprint.epistemological_nature else ""
+    lines = [
+        f"When analyzing {blueprint.inferred_domain}{nature_str} text, systematically identify and extract:"
+    ]
+    for i, pillar in enumerate(blueprint.pillars, start=1):
+        parent_suffix = f" subClassOf {pillar.target_parent_class}" if pillar.target_parent_class else ""
+        lines.append(f"{i}. **{pillar.name} (`owl:Class`{parent_suffix}):**")
+        if pillar.sample_classes:
+            lines.append(f"   Candidate concepts: {', '.join(pillar.sample_classes)}.")
+        if pillar.typical_relations:
+            lines.append(f"   Expected relations: {', '.join(pillar.typical_relations)}.")
+
+    ind_types = ", ".join(blueprint.individual_types) if blueprint.individual_types else "Concrete named entities, agencies, authors, specific programs"
+    lines.append(
+        f"{len(blueprint.pillars) + 1}. **Key Institutions & Specific Named Individuals (`owl:NamedIndividual`):**\n"
+        f"   Concrete named entities with unique identity. Example entity categories: {ind_types}. "
+        f"Use `individual_create` with the URI of the `owl:Class` this entity is an instance of."
+    )
+
+    if blueprint.cross_cutting_themes or blueprint.suggested_object_properties:
+        lines.append("\n### Cross-Pillar Relationships & Interconnections:")
+        if blueprint.cross_cutting_themes:
+            lines.append("Actively link concepts across dimensions using cross-cutting themes:")
+            for theme in blueprint.cross_cutting_themes:
+                lines.append(f"- {theme}")
+        if blueprint.suggested_object_properties:
+            lines.append(f"Suggested object properties to connect classes: {', '.join(blueprint.suggested_object_properties)}.")
+
+    return "\n".join(lines)
+
+
+def build_system_prompt(blueprint: DomainBlueprint | None = None) -> str:
+    """Build the agent system prompt, dynamically tailored to the domain blueprint if available."""
+    if blueprint is None:
+        return SYSTEM_PROMPT
+    domain_section = _DOMAIN_SECTION_TEMPLATE.format(guidelines=format_domain_guidelines(blueprint))
+    return BASE_WORKFLOW_TEMPLATE.format(domain_section=domain_section)
