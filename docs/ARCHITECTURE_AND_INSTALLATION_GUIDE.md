@@ -201,9 +201,10 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   as the `oxigraph` service in `docker-compose.yml` (started by `docker compose up -d`
   above), bound to `127.0.0.1:7878`. Override its URL with `OXIGRAPH_URL` in `.env`.
 - **OLAF** — installed as a regular Python dependency (`pip install -e .`
-  pulls it from `git+https://github.com/merlin-intelligence/olaf.git`). There
-  is no standalone OLAF server to run: `cogmaps.ontology.runner.OntologyJobRunner`
-  spawns a fresh OLAF **stdio subprocess per build job**, with a `config.toml`
+  pulls it from `git+https://github.com/merlin-intelligence/olaf.git`, pinned
+  to a commit). There is no standalone OLAF server to run:
+  `cogmaps.ontology.runner.OntologyJobRunner` spawns a fresh OLAF **stdio
+  subprocess per build job** (and the Ontology Explorer one per question), with a `config.toml`
   generated on the fly (Qdrant collection, field mapping, Oxigraph URL,
   ontology id derived from the collection name).
 - **Concept embeddings** — OLAF embeds every concept it creates (into the
@@ -235,11 +236,15 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   `AttributeError: 'Server' object has no attribute 'list_tools'`. CogMaps
   pins `mcp<2.0.0` in its own `pyproject.toml`/`requirements.txt` as a
   workaround — the real fix belongs in OLAF's own dependency pin.
-- **Updating OLAF** — since it's a git dependency, `pip install -e .` alone
-  won't pick up new commits once already installed. Force it:
+- **Updating OLAF** — the dependency is pinned to a commit
+  (`olaf.git@<sha>` in `pyproject.toml` and `requirements.txt`; the Ontology
+  Explorer's search agent needs at least the commit that added the
+  `sparql_query` tool). To move to a newer OLAF, bump the sha in both files,
+  then force the reinstall — `pip install -e .` alone won't replace an
+  already-installed git dependency:
   ```bash
   pip install --upgrade --force-reinstall --no-deps \
-    "olaf @ git+https://github.com/merlin-intelligence/olaf.git"
+    "olaf @ git+https://github.com/merlin-intelligence/olaf.git@<sha>"
   ```
   `--no-deps` avoids pip re-resolving `mcp` back to an incompatible version.
 - **Model** — the agent loop calls Nebius through `litellm`'s generic
@@ -321,14 +326,53 @@ with a target OWL parent class, 8–12 candidate concepts and typical relations.
 
 ### Ontology Explorer (`/explore ontology/`)
 
-A read-only browser over whatever's already in Oxigraph — no OLAF/agent
-involved. `cogmaps.ontology.oxigraph_client` talks straight to Oxigraph's
-SPARQL 1.1 HTTP `/query` endpoint (never `/update`): lists every named graph
-(each built ontology is `urn:olaf:{ontology_id}`, seeds are
-`urn:olaf:seed:{id}`), renders the selected one as a navigable graph (reusing
-`cogmaps.ontology.graph.build_pyvis_html`, physics-tuning panel hidden here
-unlike the Building page) plus its raw Turtle, and exposes a free-text SPARQL
-field (SELECT/ASK/CONSTRUCT/DESCRIBE) for ad-hoc queries.
+Read-only access to the ontologies already built. The page lists the
+collections the user can see (same visibility rules as everywhere else) that
+have an ontology in Oxigraph (`urn:olaf:{ontology_id}`), with three tabs:
+
+- **❓ ask** — natural-language questions answered by a search agent
+  (`cogmaps.ontology.search_agent`), ported from OLAF's
+  [`olaf_searching_agent`](https://github.com/merlin-intelligence/olaf/tree/main/demos/olaf_searching_agent)
+  demo; its system prompt (`cogmaps.ontology.search_prompts`) is copied
+  verbatim from the demo. For each question:
+  - an OLAF stdio subprocess is spawned with the same generated `config.toml`
+    as a build job, and the agent only sees OLAF's **read-only** tools
+    (`concept_search`, `concept_semantic_search`, `concept_get`,
+    `relation_search`, `chunk_read_batch`, `sparql_query`…) — any other tool
+    call is refused. It locates the entities, explores around them, writes
+    SPARQL when the question needs lists/counts/joins (fixing it when
+    Oxigraph rejects it), reads the source chunks, and answers citing them as
+    `[chunk <id>, doc <filename>]`. It may also search the seed graphs
+    (`urn:olaf:seed:*`);
+  - the model is picked from `ONTOLOGY_TOOLCALL_MODELS` (Nebius, through
+    `litellm` like the builds — `NEBIUS_API_KEY` required); a question is
+    capped at 20 LLM ↔ tool rounds, then the agent must answer with what it has;
+  - the conversation (LLM message history) is kept in the Streamlit session,
+    one per ontology, so follow-up questions work; *new conversation* resets
+    it. Old tool results are compacted like in a build, and a turn that fails
+    midway is rolled back so the history stays usable;
+  - under each answer, **evidence** shows: the part of the ontology the agent
+    used — every class/individual/property URI it looked up or got back
+    (whole-store tools such as `ontology_summary` excluded), cut out by
+    `cogmaps.ontology.graph.extract_subgraph` with their direct neighbors
+    (toggleable), the used entities drawn with a thick border; the source
+    chunks — cited ones first (fetched from Qdrant if the agent cited
+    without re-reading them), then the others it read; and the trace (SPARQL
+    queries and tool calls).
+
+  Only ontologies that already exist are offered: OLAF's startup bootstrap
+  writes an empty `owl:Ontology` declaration into a missing graph. Expect
+  roughly 1–2 minutes per question, ~45 s of which is OLAF loading its
+  embedding model at startup.
+- **🕸 browse** — the whole ontology as a navigable graph (reusing
+  `cogmaps.ontology.graph.build_pyvis_html`, physics-tuning panel hidden here
+  unlike the Building page) plus its raw Turtle.
+- **🔎 SPARQL query** — a free-text SPARQL field (SELECT/ASK/CONSTRUCT/DESCRIBE)
+  for ad-hoc queries. `cogmaps.ontology.oxigraph_client` talks straight to
+  Oxigraph's SPARQL 1.1 HTTP `/query` endpoint (never `/update`).
+
+Note that SPARQL — typed in this tab or written by the agent — is not scoped
+to the user's collections: a query naming another graph can read it.
 
 ### Ontology cleanup (`/manage/`)
 
@@ -355,7 +399,7 @@ Eigenmind is optimized to run on resource-constrained environments (e.g., 4GB RA
 
 ### 1. Memory Management
 - **Shared Model Cache**: The SentenceTransformer is loaded once on first use via `@st.cache_resource` (see `get_embedder()` in `cogmaps/ui/components.py`) and kept resident in the Streamlit server process. The same ~300 MB instance is reused across **all sessions and all users** for search, analysis, **and background ingestion jobs** — no per-request reload, no per-job copy, so a running ingestion never doubles GPU/CPU memory usage against a concurrent chat session. Concurrent calls into the shared instance are serialized internally (a `threading.Lock` around `encode*`), so ingestion and chat queue up rather than racing. The cache is released only when the process exits (e.g. `systemctl restart cogmaps`).
-- **Ontology builds**: each `/build ontology/` job runs OLAF in its own subprocess, which loads a second copy of the embedding model (ONNX, ~1.1 GB) for the duration of the build — budget for it on small VMs.
+- **Ontology builds and searches**: each `/build ontology/` job, and each question asked on `/explore ontology/`, runs OLAF in its own subprocess, which loads a second copy of the embedding model (ONNX, ~1.1 GB) for its duration — budget for it on small VMs.
 - **CLI Ingestion**: The `cogmaps-ingest` CLI is a separate, single-run process and still uses its own scoped `EmbeddingModel` (loaded at start, released at exit via `with EmbeddingModel(...)`) — there's no long-lived cache to share outside the Streamlit process.
 - **CPU-First**: By default, the app uses CPU-only PyTorch to ensure stability and avoid GPU-related memory overhead on low-end systems. CUDA / MPS are auto-detected when available.
 
@@ -404,7 +448,7 @@ Navigate between pages from the Streamlit sidebar:
 | `pages/2_Corpus_Analysis.py`| `/analyze corpus/` - Inventory, sizes, wordcloud, embedding-based topic clustering (TF-IDF labels), pairwise semantic similarity |
 | `pages/3_Chat.py`           | `/ask/` - Hybrid RAG question answering against a selected collection |
 | `pages/4_Graph_Explorer.py` | `/explore graphs/` - Subgraph view (Singular / Hinge / Theta nodes) |
-| `pages/5_Ontology_Explorer.py` | `/explore ontology/` - Browse ontologies stored in Oxigraph graphically, run read-only SPARQL queries |
+| `pages/5_Ontology_Explorer.py` | `/explore ontology/` - Ask questions over an ontology (search agent + subgraph + source chunks), browse it graphically, run read-only SPARQL queries |
 | `pages/6_Ontology_Building.py` | `/build ontology/` - Construct an OWL/RDFS ontology from selected documents via OLAF + Oxigraph |
 | `pages/7_Manage.py`         | `/manage/` - List & delete documents per ingestion date; delete collections/ontologies/seeds |
 
