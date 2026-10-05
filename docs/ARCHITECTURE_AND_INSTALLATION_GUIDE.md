@@ -346,8 +346,8 @@ have an ontology in Oxigraph (`urn:olaf:{ontology_id}`), with three tabs:
     Oxigraph rejects it), reads the source chunks, and answers citing them as
     `[chunk <id>, doc <filename>]`. It may also search the seed graphs
     (`urn:olaf:seed:*`);
-  - the model is picked from `ONTOLOGY_TOOLCALL_MODELS` (Nebius, through
-    `litellm` like the builds — `NEBIUS_API_KEY` required); a question is
+  - the model is picked from `ONTOLOGY_TOOLCALL_MODELS` (Scaleway, through
+    `litellm` like the builds — `SCALEWAY_API_KEY` required); a question is
     capped at 20 LLM ↔ tool rounds, then the agent must answer with what it has;
   - the conversation (LLM message history) is kept in the Streamlit session,
     one per ontology, so follow-up questions work; *new conversation* resets
