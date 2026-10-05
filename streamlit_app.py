@@ -13,7 +13,7 @@ def home_page():
     """Main welcome page content."""
     st.markdown(
         '<h1 style="font-family:\'Playfair Display\',Georgia,serif;font-weight:900;font-size:2.4rem;'
-        'letter-spacing:-0.03em;color:#2a1f18;margin-bottom:0">eigenmind</h1>',
+        'letter-spacing:-0.03em;color:#2a1f18;margin-bottom:0">CogMaps</h1>',
         unsafe_allow_html=True,
     )
     st.markdown('<div class="hero-tagline">/ accelerate clarity /</div>', unsafe_allow_html=True)
@@ -36,7 +36,7 @@ def home_page():
 # Page config must be first
 st.set_page_config(
     layout="wide",
-    page_title="eigenmind · accelerate clarity",
+    page_title="CogMaps · accelerate clarity",
     page_icon="⬡",
     initial_sidebar_state="expanded",
 )
@@ -48,7 +48,7 @@ if not check_password():
 
 # Define navigation structure with custom labels as requested
 pg = st.navigation([
-    st.Page(home_page, title="Eigenmind Cognitive Maps", icon="🧠", default=True),
+    st.Page(home_page, title="CogMaps", icon="🧠", default=True),
     st.Page("pages/1_Ingest.py", title="/enrich corpus/", icon="📥"),
     st.Page("pages/2_Corpus_Analysis.py", title="/analyze corpus/", icon="📊"),
     st.Page("pages/3_Chat.py", title="/ask/", icon="💬"),

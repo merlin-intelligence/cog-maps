@@ -1,7 +1,7 @@
 """Single source of truth for constants and env-based secrets.
 
 All other modules read from here instead of redefining their own constants.
-Secrets (NEBIUS_API_KEY, ...) are read from environment variables only — never hard-coded.
+Secrets (SCALEWAY_API_KEY, ...) are read from environment variables only — never hard-coded.
 """
 from __future__ import annotations
 
@@ -43,35 +43,41 @@ NEIGHBORS_TO_FETCH = 5
 # with sliders allowing up to 40 chunks, an unbounded context can exceed the
 # model's context window and fail outright instead of degrading gracefully.
 MAX_CONTEXT_CHARS = 60_000
-# The /ask/ page can answer either through the Nebius / AI Hub cloud API or a
-# local Ollama server. The provider is selected with the LLM_PROVIDER env var.
-DEFAULT_LLM_PROVIDER = "nebius"
+# The /ask/ page can answer either through the Scaleway Generative APIs cloud
+# API or a local Ollama server. The provider is selected with the LLM_PROVIDER
+# env var.
+DEFAULT_LLM_PROVIDER = "scaleway"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
-# 2026-09-17: verified against this account's actual catalog (GET /v1/models
-# on both api.studio.nebius.ai and api.tokenfactory.nebius.com — same list on
-# both) after "meta-llama/Llama-3.3-70B-Instruct" (403, no access) and
-# "moonshotai/Kimi-K2.5-fast" (404, renamed) started failing. Nebius's catalog
-# changes over time — re-verify the same way if a model here starts failing.
-NEBIUS_MODELS = (
-    "zai-org/GLM-5.3",
-    "zai-org/GLM-5.3-Flash",
-    "moonshotai/Kimi-K2.6",
-    "openai/gpt-oss-120b",
-    "deepseek-ai/DeepSeek-V4-Pro",
+# 2026-10-05: Scaleway's Generative APIs - Serverless catalog uses bare model
+# ids (no "org/" prefix, unlike Nebius) — verified against
+# https://www.scaleway.com/en/docs/generative-apis/reference-content/supported-models/
+# and cross-checked against the EOL table on that same page (deprecated/EOL
+# models are dropped from this list). Re-verify there if a model here starts
+# failing with a 422 "MODEL NOT FOUND" — Scaleway deprecates models on a
+# rolling schedule.
+SCALEWAY_MODELS = (
+    "glm-5.2",
+    "qwen3.8-27b",
+    "qwen3-235b-a22b-instruct-2507",
+    "deepseek-v4-flash-0731",
+    "gpt-oss-120b",
 )
 
 # ── Ontology-building page (/build ontology/) ──
-# Models offered for the OLAF tool-calling agent loop. Restricted to Nebius —
+# Models offered for the OLAF tool-calling agent loop. Restricted to Scaleway —
 # no function-calling wiring exists for the local Ollama backend today.
-# A distinct (not aliased) tuple from NEBIUS_MODELS: tool-calling capability
-# matters here specifically, general chat quality doesn't need the same bar.
+# A distinct (not aliased) tuple from SCALEWAY_MODELS: every entry here must
+# support function/tool calling through the Chat Completions API specifically
+# — unlike the rest of SCALEWAY_MODELS, "gpt-oss-120b" is excluded because
+# Scaleway's docs call out that its tool-calling only works through their
+# Responses API, not Chat Completions (which is what litellm/this agent use).
 ONTOLOGY_TOOLCALL_MODELS = (
-    "zai-org/GLM-5.3",
-    "zai-org/GLM-5.3-Flash",
-    "moonshotai/Kimi-K2.6",
-    "openai/gpt-oss-120b",
+    "glm-5.2",
+    "qwen3.8-27b",
+    "qwen3-235b-a22b-instruct-2507",
+    "deepseek-v4-flash-0731",
 )
-DEFAULT_DOMAIN_DISCOVERY_MODEL = "zai-org/GLM-5.3-Flash"
+DEFAULT_DOMAIN_DISCOVERY_MODEL = "qwen3.8-27b"
 DOMAIN_PROFILES_DIR = os.path.join("user_data", "ontology", "domain_profiles")
 DEFAULT_OXIGRAPH_URL = "http://localhost:7878"
 
@@ -162,7 +168,7 @@ def max_analysis_documents() -> int:
 
 
 def chat_max_tokens() -> int:
-    """Token budget for one /ask/ answer from Nebius (``CHAT_MAX_TOKENS``, default 8192).
+    """Token budget for one /ask/ answer from Scaleway (``CHAT_MAX_TOKENS``, default 8192).
 
     Reasoning models spend part of it thinking before they answer, so a low
     cap truncates long answers or leaves no room for the answer at all.
@@ -170,14 +176,14 @@ def chat_max_tokens() -> int:
     return _int_env("CHAT_MAX_TOKENS", 8192)
 
 
-def nebius_api_key() -> str:
-    """Nebius / AI Hub API key from env or st.secrets (or empty string if not set)."""
-    key = os.getenv("NEBIUS_API_KEY", "").strip()
+def scaleway_api_key() -> str:
+    """Scaleway Generative APIs key from env or st.secrets (or empty string if not set)."""
+    key = os.getenv("SCALEWAY_API_KEY", "").strip()
     if not key:
         try:
             import streamlit as st
-            if "NEBIUS_API_KEY" in st.secrets:
-                return str(st.secrets["NEBIUS_API_KEY"]).strip()
+            if "SCALEWAY_API_KEY" in st.secrets:
+                return str(st.secrets["SCALEWAY_API_KEY"]).strip()
         except Exception:
             pass
     return key
@@ -194,9 +200,9 @@ def domain_profiles_dir() -> str:
 
 
 def llm_provider() -> str:
-    """Active LLM backend for the Chat page: 'ollama' (local) or 'nebius' (cloud).
+    """Active LLM backend for the Chat page: 'ollama' (local) or 'scaleway' (cloud).
 
-    Defaults to 'nebius' so the original cloud behaviour is preserved when unset.
+    Defaults to 'scaleway' so the original cloud behaviour is preserved when unset.
     """
     return os.getenv("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower() or DEFAULT_LLM_PROVIDER
 

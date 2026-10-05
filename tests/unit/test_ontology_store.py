@@ -15,7 +15,7 @@ def _store(tmp_path) -> OntologyJobStore:
 def _create(store: OntologyJobStore, job_id: str, collection: str = "col") -> None:
     store.create_job(
         job_id=job_id, collection=collection, ontology_id="main",
-        doc_filenames=["a.pdf", "b.pdf"], llm_provider="nebius",
+        doc_filenames=["a.pdf", "b.pdf"], llm_provider="scaleway",
         llm_model="moonshotai/Kimi-K2.5-fast",
     )
 
@@ -126,7 +126,7 @@ def test_use_domain_discovery_round_trips(tmp_path):
     store = _store(tmp_path)
     store.create_job(
         job_id="j1", collection="col", ontology_id="main",
-        doc_filenames=["a.pdf"], llm_provider="nebius", llm_model="m",
+        doc_filenames=["a.pdf"], llm_provider="scaleway", llm_model="m",
         use_domain_discovery=True,
     )
     assert store.get_job("j1")["use_domain_discovery"] is True
@@ -148,7 +148,7 @@ def test_existing_db_without_discovery_column_is_migrated(tmp_path):
         )"""
     )
     conn.execute(
-        "INSERT INTO ontology_jobs VALUES ('old', 'done', 'col', 'main', '[]', 'nebius', 'm', 't', 't', 0, 0)"
+        "INSERT INTO ontology_jobs VALUES ('old', 'done', 'col', 'main', '[]', 'scaleway', 'm', 't', 't', 0, 0)"
     )
     conn.commit()
     conn.close()

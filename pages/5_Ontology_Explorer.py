@@ -201,8 +201,8 @@ with tab_ask:
 
     question = st.chat_input("ask a question about this ontology…", key=f"ask_{ontology_id}")
     if question:
-        if not sb.nebius_api_key:
-            st.warning("Set a Nebius API key in the sidebar to use the search agent.")
+        if not sb.scaleway_api_key:
+            st.warning("Set a Scaleway API key in the sidebar to use the search agent.")
         else:
             with st.chat_message("user"):
                 st.write(question)
@@ -211,7 +211,7 @@ with tab_ask:
                     turn = asyncio.run(ask_collection(
                         conversation, question,
                         qdrant_url=f"http://{sb.qdrant_host}:{sb.qdrant_port}",
-                        collection=qdrant_col, model=model, api_key=sb.nebius_api_key,
+                        collection=qdrant_col, model=model, api_key=sb.scaleway_api_key,
                         log=status.write,
                     ))
                     status.write("Building the answer's subgraph…")

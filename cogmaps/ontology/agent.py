@@ -6,9 +6,9 @@ adapted to:
   - stream progress through a ``log()`` callback into
     :class:`cogmaps.ontology.store.OntologyJobStore` instead of stderr logging,
   - scope the initial user turn to the documents selected on the page,
-  - call Nebius through ``litellm``'s generic OpenAI-compatible-endpoint
-    pattern (``model="openai/<name>"`` + explicit ``api_base``/``api_key``)
-    instead of a hardcoded LiteLLM provider,
+  - call Scaleway through ``litellm``'s native ``scaleway/`` provider
+    (``model="scaleway/<name>"`` + ``api_key``) — the same provider used by
+    :mod:`cogmaps.rag.llm_clients`'s ``ScalewayClient``,
   - persist the Turtle via an ``export_cb()`` callback instead of a static
     file path from a toml.
 """
@@ -136,7 +136,6 @@ async def run_build(
     session: ClientSession,
     *,
     model: str,
-    api_base: str,
     api_key: str,
     doc_filenames: list[str],
     log: Callable[[str], None],
@@ -181,12 +180,16 @@ async def run_build(
 
         response = await asyncio.to_thread(
             litellm.completion,
-            model=f"openai/{model}",
-            api_base=api_base,
+            model=f"scaleway/{model}",
             api_key=api_key,
             messages=messages,
             tools=tools,
             tool_choice="auto",
+            # litellm's "scaleway" provider config doesn't whitelist tools/
+            # tool_choice as supported params (as of litellm 1.101.0) even
+            # though Scaleway's own API supports tool-calling — without this,
+            # litellm raises UnsupportedParamsError instead of forwarding them.
+            allowed_openai_params=["tools", "tool_choice"],
             max_tokens=4096,
             temperature=0,
             timeout=120,

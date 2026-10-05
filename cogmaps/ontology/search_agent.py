@@ -6,8 +6,8 @@ adapted to:
   - keep the conversation in a :class:`SearchConversation` the page stores in
     ``st.session_state``, so follow-up questions work across Streamlit reruns
     even though each question spawns its own OLAF subprocess,
-  - call Nebius through ``litellm`` the same way the building agent does
-    (:mod:`cogmaps.ontology.agent`),
+  - call Scaleway through ``litellm``'s native ``scaleway/`` provider the same
+    way the building agent does (:mod:`cogmaps.ontology.agent`),
   - record a :class:`SearchTrace` of what the agent looked at (entity URIs,
     chunks read, SPARQL run) so the page can show the part of the ontology and
     the source chunks behind the answer.
@@ -32,7 +32,7 @@ from cogmaps.ontology.agent import _compact_history, _summarise, mcp_tools_to_li
 from cogmaps.ontology.mcp_client import olaf_session
 from cogmaps.ontology.olaf_config import build_config_toml
 from cogmaps.ontology.search_prompts import WRAP_UP_PROMPT, build_system_prompt
-from cogmaps.rag.llm_clients import resolve_nebius_endpoint, strip_reasoning
+from cogmaps.rag.llm_clients import strip_reasoning
 
 MAX_ITERATIONS = 20
 # Tool results longer than this are truncated before being sent to the LLM.
@@ -152,7 +152,6 @@ async def ask(
     question: str,
     *,
     model: str,
-    api_base: str,
     api_key: str,
     log: Callable[[str], None] = lambda _m: None,
     max_iterations: int = MAX_ITERATIONS,
@@ -169,7 +168,7 @@ async def ask(
     messages.append({"role": "user", "content": question})
     trace = SearchTrace()
     try:
-        answer = await _run_loop(session, messages, tools, trace, model=model, api_base=api_base,
+        answer = await _run_loop(session, messages, tools, trace, model=model,
                                  api_key=api_key, log=log, max_iterations=max_iterations)
     except BaseException:
         # A half-done turn (dangling question, tool calls without results) would
@@ -190,7 +189,6 @@ async def _run_loop(
     trace: SearchTrace,
     *,
     model: str,
-    api_base: str,
     api_key: str,
     log: Callable[[str], None],
     max_iterations: int,
@@ -198,12 +196,16 @@ async def _run_loop(
     async def complete(tool_choice: str):
         return await asyncio.to_thread(
             litellm.completion,
-            model=f"openai/{model}",
-            api_base=api_base,
+            model=f"scaleway/{model}",
             api_key=api_key,
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
+            # litellm's "scaleway" provider config doesn't whitelist tools/
+            # tool_choice as supported params (as of litellm 1.101.0) even
+            # though Scaleway's own API supports tool-calling — without this,
+            # litellm raises UnsupportedParamsError instead of forwarding them.
+            allowed_openai_params=["tools", "tool_choice"],
             max_tokens=4096,
             temperature=0,
             timeout=120,
@@ -304,12 +306,11 @@ async def ask_collection(
                 ontology_id=conversation.ontology_id,
                 ontology_name=collection,
             ))
-        chat_url, _vendor = resolve_nebius_endpoint(model)
         log("Starting OLAF…")
         async with olaf_session(config_dir) as session:
             return await ask(
                 session, conversation, question,
-                model=model, api_base=chat_url.removesuffix("/chat/completions"), api_key=api_key, log=log,
+                model=model, api_key=api_key, log=log,
             )
     finally:
         shutil.rmtree(config_dir, ignore_errors=True)

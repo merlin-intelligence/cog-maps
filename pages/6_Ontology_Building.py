@@ -177,8 +177,8 @@ def _blueprint_changed(message: str | None = None) -> None:
 
 
 def _run_discovery() -> None:
-    if not sb.nebius_api_key:
-        st.warning("Set NEBIUS_API_KEY to run domain discovery.")
+    if not sb.scaleway_api_key:
+        st.warning("Set SCALEWAY_API_KEY to run domain discovery.")
         return
     with st.spinner(f"Profiling corpus and synthesizing domain pillars with {_discovery_model}..."):
         try:
@@ -414,8 +414,8 @@ else:
              "If none exists yet, one is synthesized at launch. Unticked, the default prompt is used.",
     )
 
-    if not sb.nebius_api_key:
-        st.warning("Set NEBIUS_API_KEY to run the ontology-building agent (Nebius tool-calling only).")
+    if not sb.scaleway_api_key:
+        st.warning("Set SCALEWAY_API_KEY to run the ontology-building agent (Scaleway tool-calling only).")
     elif st.button("▶ launch build", type="primary"):
         if not selected_docs:
             st.warning("Select at least one document.")
@@ -426,7 +426,7 @@ else:
                 collection=qdrant_col,
                 ontology_id=ontology_id,
                 doc_filenames=selected_docs,
-                llm_provider="nebius",
+                llm_provider="scaleway",
                 llm_model=model,
                 use_domain_discovery=use_domain_discovery,
             )

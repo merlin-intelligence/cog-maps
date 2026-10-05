@@ -15,14 +15,14 @@ import torch
 from spacy.cli import download as spacy_download
 
 from cogmaps.config import (
-    NEBIUS_MODELS,
+    SCALEWAY_MODELS,
     llm_provider,
     ollama_host,
     ollama_models,
     qdrant_host,
     qdrant_port,
 )
-from cogmaps.config import nebius_api_key as env_nebius_key
+from cogmaps.config import scaleway_api_key as env_scaleway_key
 from cogmaps.core.embeddings import EmbeddingModel
 from cogmaps.ui.auth import (
     UserDBError,
@@ -45,7 +45,7 @@ class SidebarState:
     selected_device: str
     llm_provider: str
     llm_model: str
-    nebius_api_key: str
+    scaleway_api_key: str
     ollama_host: str
     llm_ready: bool
 
@@ -102,7 +102,7 @@ def list_ollama_models(host: str) -> list[str]:
 def _render_llm_settings() -> tuple[str, str, str, str, bool]:
     """Render the 'llm settings' sidebar block for the active provider.
 
-    Returns ``(provider, model, nebius_api_key, ollama_host_url, llm_ready)``.
+    Returns ``(provider, model, scaleway_api_key, ollama_host_url, llm_ready)``.
     """
     st.markdown(
         '<p style="font-family:\'DM Mono\',monospace;font-size:0.68rem;'
@@ -111,8 +111,8 @@ def _render_llm_settings() -> tuple[str, str, str, str, bool]:
         unsafe_allow_html=True,
     )
 
-    providers = ["nebius", "ollama"]
-    labels = {"nebius": "Nebius (cloud)", "ollama": "Ollama (local)"}
+    providers = ["scaleway", "ollama"]
+    labels = {"scaleway": "Scaleway (cloud)", "ollama": "Ollama (local)"}
     default_provider = llm_provider()
     provider = st.radio(
         "backend",
@@ -146,23 +146,23 @@ def _render_llm_settings() -> tuple[str, str, str, str, bool]:
         )
         return provider, model, "", host_url, ready
 
-    # Default provider: Nebius / AI Hub cloud
-    api_key = env_nebius_key()
+    # Default provider: Scaleway Generative APIs cloud
+    api_key = env_scaleway_key()
     try:
-        if "NEBIUS_API_KEY" in st.secrets:
-            api_key = st.secrets["NEBIUS_API_KEY"]
+        if "SCALEWAY_API_KEY" in st.secrets:
+            api_key = st.secrets["SCALEWAY_API_KEY"]
     except Exception:
         pass
 
     model = st.selectbox(
         "model",
-        NEBIUS_MODELS,
+        SCALEWAY_MODELS,
         format_func=lambda x: x.split("/")[-1],
         help="Model used in the Chat page.",
     )
     st.markdown(
         '<p style="font-family:\'DM Mono\',monospace;font-size:0.6rem;'
-        'color:#8a6a50;text-align:center;margin-top:-0.5rem">Powered by AI Hub</p>',
+        'color:#8a6a50;text-align:center;margin-top:-0.5rem">Powered by Scaleway</p>',
         unsafe_allow_html=True,
     )
     return provider, model, api_key, ollama_host(), bool(api_key)
@@ -255,7 +255,7 @@ def render_sidebar() -> SidebarState:
 
         st.markdown(
             '<p style="font-family:\'DM Mono\',monospace;font-size:0.6rem;'
-            'color:#a09080;text-align:center;margin-top:1rem;">© 2025 Prax Value Eurl</p>',
+            'color:#a09080;text-align:center;margin-top:1rem;">© 2026 Merlin Intelligence</p>',
             unsafe_allow_html=True,
         )
 
@@ -266,7 +266,7 @@ def render_sidebar() -> SidebarState:
         selected_device=device,
         llm_provider=provider,
         llm_model=model,
-        nebius_api_key=api_key,
+        scaleway_api_key=api_key,
         ollama_host=ollama_host_url,
         llm_ready=llm_ready,
     )

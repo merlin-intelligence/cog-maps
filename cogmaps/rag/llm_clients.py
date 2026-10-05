@@ -1,23 +1,26 @@
-"""LLM chat-completion clients for the RAG answer-generation pipeline (Nebius / AI Hub, Ollama)."""
+"""LLM chat-completion clients for the RAG answer-generation pipeline (Scaleway, Ollama).
+
+Every backend goes through litellm's native provider support — Scaleway via
+``scaleway/<name>`` (it already knows Scaleway's base URL and auth header;
+only ``api_key`` needs passing), Ollama via ``ollama_chat/<name>`` — instead of
+a hand-rolled HTTP client per vendor. The OLAF tool-calling agent
+(:mod:`cogmaps.ontology.agent`) uses the same ``scaleway/`` provider. Swapping
+or adding a cloud provider is then a one-line change (model prefix, maybe
+``api_key``) rather than a new client class.
+"""
 from __future__ import annotations
 
 import logging
 import re
 
-import requests
+import litellm
+from openai import APIConnectionError, APIError
 
 from cogmaps.config import chat_max_tokens
 
 logger = logging.getLogger(__name__)
 
-# Vendor orgs (the part of "org/model-name" before the slash) routed through
-# the TokenFactory endpoint; every other org uses Studio. Matching the org
-# exactly (rather than a substring search over the whole model name) avoids
-# accidental matches if a future model name happens to contain "openai"
-# elsewhere in it.
-_TOKENFACTORY_ORGS = frozenset({"moonshotai", "openai", "zai-org"})
-
-# Some reasoning models (DeepSeek-R1, Qwen3… on Ollama or Nebius) inline their
+# Some reasoning models (DeepSeek-R1, Qwen3… on Ollama or Scaleway) inline their
 # chain of thought in the answer text instead of a separate field.
 _THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
@@ -30,138 +33,137 @@ def strip_reasoning(text: str) -> str:
     return text.strip()
 
 
-def resolve_nebius_endpoint(model: str) -> tuple[str, str]:
-    """Pick the Nebius Chat Completions URL for ``model`` (TokenFactory for Kimi/GPT-OSS, Studio for the rest).
+def _chat_completion(
+    *,
+    vendor: str,
+    model: str,
+    api_base: str | None,
+    api_key: str | None,
+    system_prompt: str,
+    user_content: str,
+    timeout: int,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+) -> str:
+    """Shared litellm.completion call + response handling for every provider.
 
-    Returns ``(api_url, vendor)``. Shared by :class:`NebiusClient` and the
-    ontology-building agent (:mod:`cogmaps.ontology.agent`), which calls
-    Nebius through ``litellm`` instead of this module's ``chat()``.
+    ``model`` is litellm's provider-prefixed form (e.g. ``"scaleway/<name>"``,
+    ``"ollama_chat/<name>"``). Raises on transport/HTTP errors or empty content.
     """
-    org = model.split("/", 1)[0]
-    if org in _TOKENFACTORY_ORGS:
-        return "https://api.tokenfactory.nebius.com/v1/chat/completions", "AI Hub"
-    return "https://api.studio.nebius.ai/v1/chat/completions", "AI Hub Studio"
+    logger.info("%s chat: model=%s prompt=%r", vendor, model, user_content[:80])
+    kwargs = {
+        "model": model,
+        "api_base": api_base,
+        "api_key": api_key,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "timeout": timeout,
+    }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    try:
+        response = litellm.completion(**kwargs)
+    except APIConnectionError as e:
+        logger.error("Cannot reach %s: %s", vendor, e)
+        raise RuntimeError(f"Cannot reach {vendor}: {e}") from e
+    except APIError as e:
+        status = getattr(e, "status_code", "?")
+        logger.error("%s API error %s: %s", vendor, status, e)
+        raise RuntimeError(f"{vendor} API {status}: {e}") from e
+
+    choice = response.choices[0]
+    msg = choice.message
+    # Reasoning models return their chain of thought separately
+    # (reasoning_content / reasoning) — only the answer is shown to the user.
+    reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+    if reasoning:
+        logger.debug("%s reasoning (not shown): %s", vendor, reasoning[:500])
+    answer = strip_reasoning(msg.get("content") or "")
+
+    if not answer:
+        if reasoning and choice.finish_reason == "length":
+            raise RuntimeError(
+                f"{model} used its whole token budget reasoning and produced no answer — "
+                "raise CHAT_MAX_TOKENS, or pick a non-reasoning model."
+            )
+        logger.error("%s empty content in response: %s", vendor, response)
+        raise RuntimeError(f"Empty content in response: {response}")
+    logger.debug("%s chat done: answer_len=%d", vendor, len(answer))
+    return answer
 
 
-class NebiusClient:
-    """Client for the Nebius / AI Hub Chat Completions endpoints.
+class ScalewayClient:
+    """Client for Scaleway Generative APIs, via litellm's native ``scaleway/`` provider.
 
-    The endpoint is selected automatically based on the model name (TokenFactory for
-    Kimi/GPT-OSS, Studio for the rest).
+    litellm already knows Scaleway's base URL and auth header for this
+    provider, so only the model id and API key are passed.
     """
 
     def __init__(self, model: str, api_key: str):
         self.model = model
         self.api_key = api_key
-        self.api_url, self.vendor = resolve_nebius_endpoint(model)
-        self._user_content_is_blocks = self.vendor == "AI Hub"
-        logger.debug("NebiusClient: vendor=%s model=%s", self.vendor, self.model)
+        self.litellm_model = f"scaleway/{model}"
+        self.vendor = "Scaleway"
+        logger.debug("ScalewayClient: model=%s", self.model)
 
     def chat(self, system_prompt: str, user_content: str) -> str:
         """Single-turn chat completion. Raises on non-200 responses or empty content."""
-        logger.info("Nebius chat: model=%s prompt=%r", self.model, user_content[:80])
-        user_content_payload = (
-            [{"type": "text", "text": user_content}]
-            if self._user_content_is_blocks
-            else user_content
+        return _chat_completion(
+            vendor=self.vendor,
+            model=self.litellm_model,
+            api_base=None,
+            api_key=self.api_key,
+            system_prompt=system_prompt,
+            user_content=user_content,
+            timeout=120,
+            max_tokens=chat_max_tokens(),
+            temperature=0.7,
         )
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content_payload},
-            ],
-            "max_tokens": chat_max_tokens(),
-            "temperature": 0.7,
-        }
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        try:
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=120)
-        except requests.RequestException as e:
-            logger.error("Cannot reach %s: %s", self.vendor, e)
-            raise RuntimeError(f"Cannot reach {self.vendor}: {e}") from e
-        if response.status_code != 200:
-            logger.error("Nebius API error %s: %s", response.status_code, response.text[:200])
-            raise RuntimeError(f"{self.vendor} API {response.status_code}: {response.text}")
-
-        result = response.json()
-        if not (result.get("choices") and result["choices"][0].get("message")):
-            logger.error("Nebius unexpected response format: %s", result)
-            raise RuntimeError(f"Unexpected response format: {result}")
-
-        choice = result["choices"][0]
-        msg = choice["message"]
-        # Reasoning models return their chain of thought separately
-        # (reasoning_content / reasoning) — only the answer is shown to the user.
-        reasoning = msg.get("reasoning_content") or msg.get("reasoning")
-        if reasoning:
-            logger.debug("Nebius reasoning (not shown): %s", reasoning[:500])
-        answer = strip_reasoning(msg.get("content") or "")
-
-        if not answer:
-            if reasoning and choice.get("finish_reason") == "length":
-                raise RuntimeError(
-                    f"{self.model} used its whole token budget reasoning and produced no answer — "
-                    "raise CHAT_MAX_TOKENS, or pick a non-reasoning model."
-                )
-            logger.error("Nebius empty content in response: %s", result)
-            raise RuntimeError(f"Empty content in response: {result}")
-        logger.debug("Nebius chat done: answer_len=%d", len(answer))
-        return answer
 
 
 class OllamaClient:
-    """Client for a local Ollama server's native chat endpoint (``/api/chat``).
+    """Client for a local Ollama server, via litellm's ``ollama_chat`` provider.
 
     Exposes the same ``chat(system_prompt, user_content)`` interface as
-    :class:`NebiusClient`, so the Chat page stays provider-agnostic. No API key
-    is required — generation happens entirely on the local machine.
+    :class:`ScalewayClient`, so the Chat page stays provider-agnostic. No API key
+    is required — generation happens entirely on the local machine. Unlike
+    :class:`ScalewayClient`, no ``max_tokens``/``temperature`` are forced, so
+    Ollama keeps using each model's own defaults.
     """
 
     def __init__(self, model: str, host: str):
         self.model = model
         self.host = host.rstrip("/")
-        self.api_url = f"{self.host}/api/chat"
+        self.litellm_model = f"ollama_chat/{model}"
         self.vendor = "Ollama"
         logger.debug("OllamaClient: host=%s model=%s", self.host, self.model)
 
     def chat(self, system_prompt: str, user_content: str) -> str:
         """Single-turn chat completion. Raises on transport/HTTP errors or empty content."""
-        logger.info("Ollama chat: model=%s prompt=%r", self.model, user_content[:80])
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": False,
-        }
-        try:
-            response = requests.post(self.api_url, json=payload, timeout=600)
-        except requests.RequestException as e:
-            logger.error("Cannot reach Ollama at %s: %s", self.host, e)
-            raise RuntimeError(f"Cannot reach Ollama at {self.host}: {e}") from e
-        if response.status_code != 200:
-            logger.error("Ollama API error %s: %s", response.status_code, response.text[:200])
-            raise RuntimeError(f"{self.vendor} API {response.status_code}: {response.text}")
-
-        result = response.json()
-        content = strip_reasoning((result.get("message") or {}).get("content", "") or "")
-        if not content:
-            logger.error("Ollama empty content in response: %s", result)
-            raise RuntimeError(f"Empty content in response: {result}")
-        logger.debug("Ollama chat done: model=%s answer_len=%d", self.model, len(content))
-        return content
+        return _chat_completion(
+            vendor=self.vendor,
+            model=self.litellm_model,
+            api_base=self.host,
+            api_key=None,
+            system_prompt=system_prompt,
+            user_content=user_content,
+            timeout=600,
+        )
 
 
 def build_llm_client(state):
     """Construct the chat client for the provider selected in the sidebar.
 
     ``state`` is a :class:`cogmaps.ui.components.SidebarState` — kept duck-typed here
-    (only ``llm_provider``, ``llm_model``, ``ollama_host``, ``nebius_api_key`` are read)
+    (only ``llm_provider``, ``llm_model``, ``ollama_host``, ``scaleway_api_key`` are read)
     so this module doesn't need to import the UI layer.
     """
     logger.info("Building LLM client: provider=%s model=%s", state.llm_provider, state.llm_model)
     if state.llm_provider == "ollama":
         return OllamaClient(model=state.llm_model, host=state.ollama_host)
-    return NebiusClient(model=state.llm_model, api_key=state.nebius_api_key)
+    return ScalewayClient(model=state.llm_model, api_key=state.scaleway_api_key)

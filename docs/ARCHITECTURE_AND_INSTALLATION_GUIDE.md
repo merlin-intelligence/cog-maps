@@ -5,7 +5,7 @@
 *   **Frontend**: Streamlit multipage app (`streamlit_app.py` + `pages/`)
 *   **Vector Database**: Qdrant (Running locally via Docker)
 *   **Embeddings**: SentenceTransformers (`intfloat/multilingual-e5-base`, 768-dim, multilingual). E5 `query:` / `passage:` prefixes are applied automatically by the wrapper in `cogmaps/core/embeddings.py`. Runs locally on CPU/CUDA/MPS, and is cached process-wide (single instance shared across all Streamlit sessions and users).
-*   **LLM Provider**: Two interchangeable backends selectable from the sidebar — **Nebius AI** (Llama, Kimi, OSS models via REST API, requires `NEBIUS_API_KEY`) or **Ollama** (fully local, no API key, no data leaves the machine)
+*   **LLM Provider**: Two interchangeable backends selectable from the sidebar — **Scaleway** (Llama, Kimi, OSS models via REST API, requires `SCALEWAY_API_KEY`) or **Ollama** (fully local, no API key, no data leaves the machine)
 *   **Processing**: ChunkNorris (parses PDF/DOCX/XLSX/CSV/MD to markdown and chunks every format uniformly), MarkItDown (PowerPoint → markdown), NLTK (Key Concept Extraction & stopwords), SciPy/NumPy (Graph Mathematics), scikit-learn (KMeans, PCA, TF-IDF for corpus analysis), wordcloud (visual term frequency)
 *   **Async Ingestion**: jobs run in a daemon thread decoupled from the browser session (`cogmaps/jobs/`). State is persisted in `user_data/jobs.db` (SQLite, WAL mode) so the UI can reconnect to a running job after a tab closure or network interruption.
 *   **Multi-User**: per-user authentication with role support (regular users and admins). Collections are either **private** (namespaced `<user>_<collection>`, visible only to the owner) or **public** (namespaced `public_<collection>`, visible to all authenticated users, writable by admins only). Per-user OAuth token storage under `user_data/<user>/`.
@@ -67,7 +67,7 @@ cp .env.example .env
 
 ```dotenv
 # .env
-NEBIUS_API_KEY=your_nebius_api_key_here
+SCALEWAY_API_KEY=your_scaleway_api_key_here
 SHAREPOINT_CLIENT_ID=your_azure_client_id
 SHAREPOINT_CLIENT_SECRET=your_azure_client_secret
 QDRANT_HOST=localhost
@@ -79,7 +79,7 @@ QDRANT_API_KEY=your_generated_qdrant_api_key_here
 # — above this, a random sample is analyzed instead to bound memory use (default 3000)
 # MAX_ANALYSIS_DOCUMENTS=3000
 # Optional: domain discovery on /build ontology/ (see Step 4)
-# DOMAIN_DISCOVERY_MODEL=zai-org/GLM-5.3-Flash
+# DOMAIN_DISCOVERY_MODEL=qwen3.8-27b
 # DOMAIN_PROFILES_DIR=user_data/ontology/domain_profiles
 # HF_TOKEN=...   # only if you need a gated local LLM
 ```
@@ -89,8 +89,8 @@ QDRANT_API_KEY=your_generated_qdrant_api_key_here
 ```toml
 # .streamlit/secrets.toml
 
-# Nebius AI (Required for /ask/)
-NEBIUS_API_KEY = "your_nebius_api_key_here"
+# Scaleway (Required for /ask/)
+SCALEWAY_API_KEY = "your_scaleway_api_key_here"
 
 # SharePoint (Optional: For SharePoint ingestion)
 SHAREPOINT_CLIENT_ID = "your_azure_client_id"
@@ -104,7 +104,7 @@ bob   = "bob_password"
 
 When both sources are present, `st.secrets` takes precedence over `.env` — with one
 exception: the background ontology jobs (domain discovery, build agent) resolve
-`NEBIUS_API_KEY` through `cogmaps.config.nebius_api_key()`, which reads the
+`SCALEWAY_API_KEY` through `cogmaps.config.scaleway_api_key()`, which reads the
 environment first and only falls back to `st.secrets` when the variable is unset.
 Keep both values identical if you define the key in both places.
 
@@ -158,7 +158,7 @@ Failed logins are throttled per username (5 attempts / 5 minutes, in-memory — 
 
 The Chat page can answer through either backend, picked from the **backend** toggle in the sidebar. `LLM_PROVIDER` only sets which one is selected by default on startup:
 
-- **`nebius`** (default) — cloud generation via the Nebius / AI Hub API. Requires `NEBIUS_API_KEY`.
+- **`scaleway`** (default) — cloud generation via the Scaleway Generative APIs. Requires `SCALEWAY_API_KEY`.
 - **`ollama`** — fully local generation via an [Ollama](https://ollama.com) server. No API key, no data leaves the machine.
 
 ```dotenv
@@ -168,7 +168,7 @@ OLLAMA_HOST=http://localhost:11434   # default; override if Ollama runs elsewher
 # OLLAMA_MODELS=qwen2.5:7b           # optional fallback list if the server can't be queried
 ```
 
-With **Nebius**, an answer is capped at `CHAT_MAX_TOKENS` tokens (default 8192). Reasoning models (GLM, Kimi, gpt-oss) count their hidden reasoning against that budget — raise it in `.env` if answers come back truncated. Only the final answer is shown, with either backend: reasoning returned in a separate field is logged at `DEBUG` level, and inline `<think>…</think>` blocks (DeepSeek-R1, Qwen3… on Ollama) are stripped.
+With **Scaleway**, an answer is capped at `CHAT_MAX_TOKENS` tokens (default 8192). Reasoning models (GLM, Kimi, gpt-oss) count their hidden reasoning against that budget — raise it in `.env` if answers come back truncated. Only the final answer is shown, with either backend: reasoning returned in a separate field is logged at `DEBUG` level, and inline `<think>…</think>` blocks (DeepSeek-R1, Qwen3… on Ollama) are stripped.
 
 When **Ollama** is selected, the model dropdown is populated automatically from the models installed on the server (`ollama list`). Pull at least one first, e.g. `ollama pull qwen2.5:7b`, and make sure the server is running (`ollama serve`).
 
@@ -247,16 +247,18 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
     "olaf @ git+https://github.com/merlin-intelligence/olaf.git@<sha>"
   ```
   `--no-deps` avoids pip re-resolving `mcp` back to an incompatible version.
-- **Model** — the agent loop calls Nebius through `litellm`'s generic
-  OpenAI-compatible-endpoint support (`model="openai/<name>"` + explicit
-  `api_base`/`api_key`), so `NEBIUS_API_KEY` (Step 3) is required. Choices
-  are `ONTOLOGY_TOOLCALL_MODELS` in `cogmaps/config.py` — Nebius's catalog
-  changes over time, so a model that used to work can start failing with a
-  403 (no access) or 404 (renamed/removed). Verify what's actually available
-  before changing the list:
+- **Model** — the agent loop calls Scaleway through `litellm`'s native
+  `scaleway/` provider (`model="scaleway/<name>"` + `api_key`, no `api_base`
+  needed — litellm already knows Scaleway's endpoint), so `SCALEWAY_API_KEY`
+  (Step 3) is required. Choices are `ONTOLOGY_TOOLCALL_MODELS` in
+  `cogmaps/config.py` — note Scaleway's model ids are bare (no `org/` prefix,
+  unlike some other providers). Scaleway's catalog changes over time, so a
+  model that used to work can start failing with a 422 (`MODEL NOT FOUND` —
+  renamed/removed from the catalog) or 403 (no access). Verify what's
+  actually available before changing the list:
   ```bash
-  curl -s https://api.studio.nebius.ai/v1/models \
-    -H "Authorization: Bearer $NEBIUS_API_KEY" | jq -r '.data[].id'
+  curl -s https://api.scaleway.ai/v1/models \
+    -H "Authorization: Bearer $SCALEWAY_API_KEY" | jq -r '.data[].id'
   ```
   Ollama is not supported for this page (no function-calling wiring for it
   today).
@@ -311,8 +313,8 @@ with a target OWL parent class, 8–12 candidate concepts and typical relations.
   build continues with the default prompt.
 - **Discovery** — `cogmaps.ontology.domain_discovery` samples one random
   chunk per document (up to 15 documents, 500 characters each) from Qdrant
-  and asks a Nebius model to synthesize the blueprint. The model is
-  `DOMAIN_DISCOVERY_MODEL` (default `zai-org/GLM-5.3-Flash`); `NEBIUS_API_KEY`
+  and asks a Scaleway model to synthesize the blueprint. The model is
+  `DOMAIN_DISCOVERY_MODEL` (default `qwen3.8-27b`); `SCALEWAY_API_KEY`
   is required. Excerpts are random, so two discoveries on the same
   collection can differ.
 - **Editing** — the **🧬 Domain discovery** section of `/build ontology/` lets
@@ -344,8 +346,8 @@ have an ontology in Oxigraph (`urn:olaf:{ontology_id}`), with three tabs:
     Oxigraph rejects it), reads the source chunks, and answers citing them as
     `[chunk <id>, doc <filename>]`. It may also search the seed graphs
     (`urn:olaf:seed:*`);
-  - the model is picked from `ONTOLOGY_TOOLCALL_MODELS` (Nebius, through
-    `litellm` like the builds — `NEBIUS_API_KEY` required); a question is
+  - the model is picked from `ONTOLOGY_TOOLCALL_MODELS` (Scaleway, through
+    `litellm` like the builds — `SCALEWAY_API_KEY` required); a question is
     capped at 20 LLM ↔ tool rounds, then the agent must answer with what it has;
   - the conversation (LLM message history) is kept in the Streamlit session,
     one per ontology, so follow-up questions work; *new conversation* resets

@@ -69,7 +69,7 @@ def _script_completions(monkeypatch, responses: list):
 
 
 def _ask(session, conversation, question, **kwargs):
-    return asyncio.run(ask(session, conversation, question, model="m", api_base="b", api_key="k", **kwargs))
+    return asyncio.run(ask(session, conversation, question, model="m", api_key="k", **kwargs))
 
 
 def test_ask_exposes_only_read_only_tools(monkeypatch):
