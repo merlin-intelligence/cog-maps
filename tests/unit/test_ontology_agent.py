@@ -89,7 +89,6 @@ def _run(session, **kwargs):
     asyncio.run(run_build(
         session,
         model="m",
-        api_base="http://x",
         api_key="k",
         doc_filenames=["doc1.pdf"],
         log=logs.append,

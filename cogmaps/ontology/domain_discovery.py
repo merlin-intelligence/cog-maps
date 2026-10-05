@@ -3,7 +3,7 @@
 Discovers the latent domain, epistemological nature, taxonomical pillars,
 key entity types, and cross-cutting relationships of a corpus using fast,
 per-document chunk sampling and an LLM synthesis call
-(``DOMAIN_DISCOVERY_MODEL``, GLM-5.3-Flash by default).
+(``DOMAIN_DISCOVERY_MODEL``, qwen3.8-27b by default).
 """
 from __future__ import annotations
 
@@ -15,18 +15,18 @@ import re
 from datetime import datetime
 from typing import Any
 
+import litellm
+from openai import APIConnectionError, APIError
 from pydantic import BaseModel, Field
 from qdrant_client import models
-import requests
 
 from cogmaps.config import (
     domain_discovery_model,
     domain_profiles_dir,
-    nebius_api_key,
+    scaleway_api_key,
 )
 from cogmaps.ontology.olaf_config import sanitize_ontology_id
 from cogmaps.qdrant.store import QdrantStore
-from cogmaps.rag.llm_clients import resolve_nebius_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -267,13 +267,11 @@ def synthesize_domain_blueprint(
     model: str | None = None,
     api_key: str | None = None,
 ) -> DomainBlueprint:
-    """Synthesize a DomainBlueprint via Nebius Chat Completions (``DOMAIN_DISCOVERY_MODEL`` by default)."""
+    """Synthesize a DomainBlueprint via Scaleway Chat Completions (``DOMAIN_DISCOVERY_MODEL`` by default)."""
     target_model = model or domain_discovery_model()
-    target_key = api_key or nebius_api_key()
+    target_key = api_key or scaleway_api_key()
     if not target_key:
-        raise ValueError("Nebius API key is required for automated domain discovery.")
-
-    api_url, _vendor = resolve_nebius_endpoint(target_model)
+        raise ValueError("Scaleway API key is required for automated domain discovery.")
 
     user_lines = [
         f"Collection name: {collection}",
@@ -291,37 +289,31 @@ def synthesize_domain_blueprint(
 
     user_content = "\n".join(user_lines)
 
-    headers = {
-        "Authorization": f"Bearer {target_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": target_model,
-        "messages": [
-            {"role": "system", "content": DISCOVERY_SYSTEM_PROMPT},
-            {"role": "user", "content": [{"type": "text", "text": user_content}]},
-        ],
-        "max_tokens": 8192,
-        "temperature": 0.2,
-    }
-
     logger.info("Running domain discovery with model=%s on collection=%s", target_model, collection)
     try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=90)
-    except requests.RequestException as e:
-        logger.error("Failed to connect to Nebius for domain discovery: %s", e)
-        raise RuntimeError(f"Domain discovery failed to reach Nebius: {e}") from e
+        response = litellm.completion(
+            model=f"scaleway/{target_model}",
+            api_key=target_key,
+            messages=[
+                {"role": "system", "content": DISCOVERY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=8192,
+            temperature=0.2,
+            timeout=90,
+        )
+    except APIConnectionError as e:
+        logger.error("Failed to connect to Scaleway for domain discovery: %s", e)
+        raise RuntimeError(f"Domain discovery failed to reach Scaleway: {e}") from e
+    except APIError as e:
+        status = getattr(e, "status_code", "?")
+        logger.error("Scaleway domain discovery returned error %s: %s", status, e)
+        raise RuntimeError(f"Scaleway API error {status}: {e}") from e
 
-    if response.status_code != 200:
-        logger.error("Nebius domain discovery returned error %s: %s", response.status_code, response.text[:200])
-        raise RuntimeError(f"Nebius API error {response.status_code}: {response.text}")
+    if not response.choices or not response.choices[0].message:
+        raise RuntimeError(f"Unexpected Scaleway response structure: {response}")
 
-    resp_json = response.json()
-    choices = resp_json.get("choices", [])
-    if not choices or not choices[0].get("message"):
-        raise RuntimeError(f"Unexpected Nebius response structure: {resp_json}")
-
-    msg = choices[0]["message"]
+    msg = response.choices[0].message
     raw_content = msg.get("content") or ""
     if "{" not in raw_content:
         reasoning = msg.get("reasoning_content") or ""

@@ -1,10 +1,12 @@
-"""Unit tests for the pluggable Chat-page LLM backend (Nebius cloud / local Ollama)."""
+"""Unit tests for the pluggable Chat-page LLM backend (Scaleway cloud / local Ollama)."""
 from __future__ import annotations
 
 import pytest
 
+from litellm.types.utils import Choices, Message, ModelResponse
+
 from cogmaps import config
-from cogmaps.rag.llm_clients import NebiusClient, OllamaClient, build_llm_client
+from cogmaps.rag.llm_clients import OllamaClient, ScalewayClient, build_llm_client
 from cogmaps.ui.components import SidebarState
 
 
@@ -14,9 +16,9 @@ def _state(**overrides) -> SidebarState:
         "qdrant_port": 6333,
         "is_connected": True,
         "selected_device": "cpu",
-        "llm_provider": "nebius",
-        "llm_model": "meta-llama/Llama-3.3-70B-Instruct",
-        "nebius_api_key": "key",
+        "llm_provider": "scaleway",
+        "llm_model": "llama-3.3-70b-instruct",
+        "scaleway_api_key": "key",
         "ollama_host": "http://localhost:11434",
         "llm_ready": True,
     }
@@ -26,9 +28,9 @@ def _state(**overrides) -> SidebarState:
 
 # ── config.llm_provider ──
 
-def test_llm_provider_defaults_to_nebius(monkeypatch):
+def test_llm_provider_defaults_to_scaleway(monkeypatch):
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
-    assert config.llm_provider() == "nebius"
+    assert config.llm_provider() == "scaleway"
 
 
 def test_llm_provider_normalises_case_and_whitespace(monkeypatch):
@@ -110,9 +112,10 @@ def test_max_analysis_documents_parses_a_real_override(monkeypatch):
 
 # ── OllamaClient ──
 
-def test_ollama_client_builds_native_chat_url():
+def test_ollama_client_strips_trailing_slash_from_host():
     client = OllamaClient(model="qwen2.5:7b", host="http://localhost:11434/")
-    assert client.api_url == "http://localhost:11434/api/chat"
+    assert client.host == "http://localhost:11434"
+    assert client.litellm_model == "ollama_chat/qwen2.5:7b"
     assert client.model == "qwen2.5:7b"
 
 
@@ -124,54 +127,44 @@ def test_build_llm_client_selects_ollama():
     assert client.model == "qwen2.5:7b"
 
 
-def test_build_llm_client_defaults_to_nebius():
-    client = build_llm_client(_state(llm_provider="nebius", llm_model="meta-llama/Llama-3.3-70B-Instruct",
-                                      nebius_api_key="secret-key"))
-    assert isinstance(client, NebiusClient)
-    assert client.model == "meta-llama/Llama-3.3-70B-Instruct"
+def test_build_llm_client_defaults_to_scaleway():
+    client = build_llm_client(_state(llm_provider="scaleway", llm_model="llama-3.3-70b-instruct",
+                                      scaleway_api_key="secret-key"))
+    assert isinstance(client, ScalewayClient)
+    assert client.model == "llama-3.3-70b-instruct"
     assert client.api_key == "secret-key"
 
 
-# ── NebiusClient endpoint routing ──
+# ── ScalewayClient routes through litellm's native "scaleway/" provider ──
 
-def test_nebius_client_routes_moonshotai_to_tokenfactory():
-    client = NebiusClient(model="moonshotai/Kimi-K2.5-fast", api_key="k")
-    assert client.api_url == "https://api.tokenfactory.nebius.com/v1/chat/completions"
+def test_scaleway_client_uses_the_native_litellm_provider(monkeypatch):
+    client = ScalewayClient(model="glm-5.2", api_key="k")
+    assert client.litellm_model == "scaleway/glm-5.2"
 
+    captured = {}
 
-def test_nebius_client_routes_other_orgs_to_studio():
-    client = NebiusClient(model="meta-llama/Llama-3.3-70B-Instruct", api_key="k")
-    assert client.api_url == "https://api.studio.nebius.ai/v1/chat/completions"
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        return ModelResponse(choices=[Choices(finish_reason="stop", index=0, message=Message(content="hi"))])
 
-
-def test_nebius_client_routes_zai_org_to_tokenfactory():
-    client = NebiusClient(model="zai-org/GLM-5.3", api_key="k")
-    assert client.api_url == "https://api.tokenfactory.nebius.com/v1/chat/completions"
-
-
-def test_nebius_client_org_match_is_exact_not_substring():
-    # An org name that merely *contains* "openai" must not be misrouted —
-    # only an exact "openai" org (before the first "/") should match.
-    client = NebiusClient(model="notopenai/some-model", api_key="k")
-    assert client.api_url == "https://api.studio.nebius.ai/v1/chat/completions"
+    monkeypatch.setattr("cogmaps.rag.llm_clients.litellm.completion", fake_completion)
+    client.chat("sys", "q")
+    assert captured["model"] == "scaleway/glm-5.2"
+    assert captured["api_key"] == "k"
+    # No api_base override — litellm's "scaleway/" provider already knows it.
+    assert captured["api_base"] is None
 
 
 # ── Reasoning is never shown in the answer ──
 
-class _FakeResponse:
-    status_code = 200
-
-    def __init__(self, payload):
-        self._payload = payload
-
-    def json(self):
-        return self._payload
+def _fake_completion_response(message: dict, finish_reason: str = "stop") -> ModelResponse:
+    return ModelResponse(choices=[Choices(finish_reason=finish_reason, index=0, message=Message(**message))])
 
 
-def _nebius_reply(monkeypatch, message, finish_reason="stop"):
-    payload = {"choices": [{"message": message, "finish_reason": finish_reason}]}
-    monkeypatch.setattr("cogmaps.rag.llm_clients.requests.post", lambda *a, **kw: _FakeResponse(payload))
-    return NebiusClient(model="zai-org/GLM-5.3", api_key="key")
+def _scaleway_reply(monkeypatch, message, finish_reason="stop"):
+    response = _fake_completion_response(message, finish_reason)
+    monkeypatch.setattr("cogmaps.rag.llm_clients.litellm.completion", lambda **kw: response)
+    return ScalewayClient(model="glm-5.2", api_key="key")
 
 
 def test_strip_reasoning_removes_think_blocks():
@@ -182,18 +175,18 @@ def test_strip_reasoning_removes_think_blocks():
     assert strip_reasoning("Plain answer.") == "Plain answer."
 
 
-def test_nebius_client_hides_reasoning_content(monkeypatch):
-    client = _nebius_reply(monkeypatch, {"content": "The answer [Chunk 1].", "reasoning_content": "Step 1..."})
+def test_scaleway_client_hides_reasoning_content(monkeypatch):
+    client = _scaleway_reply(monkeypatch, {"content": "The answer [Chunk 1].", "reasoning_content": "Step 1..."})
     assert client.chat("sys", "q") == "The answer [Chunk 1]."
 
 
-def test_nebius_client_explains_reasoning_that_ate_the_budget(monkeypatch):
-    client = _nebius_reply(monkeypatch, {"content": "", "reasoning_content": "Step 1..."}, finish_reason="length")
+def test_scaleway_client_explains_reasoning_that_ate_the_budget(monkeypatch):
+    client = _scaleway_reply(monkeypatch, {"content": "", "reasoning_content": "Step 1..."}, finish_reason="length")
     with pytest.raises(RuntimeError, match="token budget"):
         client.chat("sys", "q")
 
 
 def test_ollama_client_strips_inline_think_block(monkeypatch):
-    payload = {"message": {"content": "<think>hmm</think>The answer."}}
-    monkeypatch.setattr("cogmaps.rag.llm_clients.requests.post", lambda *a, **kw: _FakeResponse(payload))
+    response = _fake_completion_response({"content": "<think>hmm</think>The answer."})
+    monkeypatch.setattr("cogmaps.rag.llm_clients.litellm.completion", lambda **kw: response)
     assert OllamaClient(model="qwen3:8b", host="http://localhost:11434").chat("sys", "q") == "The answer."

@@ -185,25 +185,27 @@ def test_sample_corpus_for_discovery_falls_back_to_scroll_without_random_samplin
 
 
 def test_synthesize_domain_blueprint_success(sample_blueprint):
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "choices": [
-            {
-                "message": {
-                    "content": sample_blueprint.model_dump_json(),
-                    "reasoning_content": "Reasoning about finance corpus...",
-                }
-            }
-        ]
-    }
+    from litellm.types.utils import Choices, Message, ModelResponse
 
-    with patch("requests.post", return_value=mock_response):
+    mock_response = ModelResponse(
+        choices=[
+            Choices(
+                finish_reason="stop",
+                index=0,
+                message=Message(
+                    content=sample_blueprint.model_dump_json(),
+                    reasoning_content="Reasoning about finance corpus...",
+                ),
+            )
+        ]
+    )
+
+    with patch("litellm.completion", return_value=mock_response):
         blueprint = synthesize_domain_blueprint(
             collection="test_finance",
             doc_filenames=["report1.pdf", "report2.pdf"],
             chunk_samples=[{"doc": "report1.pdf", "chunk_number": 0, "text": "Fed rate cut"}],
-            model="zai-org/GLM-5.3-Flash",
+            model="qwen3.8-27b",
             api_key="test_key",
         )
         assert blueprint.inferred_domain == sample_blueprint.inferred_domain

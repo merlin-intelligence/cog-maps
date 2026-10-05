@@ -3,7 +3,7 @@ The software is licensed under MIT.
 The CogMaps and Merlin Intelligence names, logos and branding are not covered by the MIT license and may not be used without permission.
 # cog-maps - /accelerate clarity/
 
-CogMaps is a sophisticated knowledge management and exploration application built with Streamlit. It leverages a local Vector Database (Qdrant via Docker) and advanced AI models to ingest, map, and query your proprietary document corpus. LLM generation supports two interchangeable backends: **Nebius AI** (cloud, Llama / Kimi / OSS models) and **Ollama** (fully local, no data leaves the machine).
+CogMaps is a sophisticated knowledge management and exploration application built with Streamlit. It leverages a local Vector Database (Qdrant via Docker) and advanced AI models to ingest, map, and query your proprietary document corpus. LLM generation supports two interchangeable backends: **Scaleway** (cloud, Llama / Kimi / OSS models) and **Ollama** (fully local, no data leaves the machine).
 
 ## Core Features
 
@@ -21,7 +21,7 @@ CogMaps is a sophisticated knowledge management and exploration application buil
 
 3. **Advanced Question Answering (`/ask/`)**
    - Hybrid Retrieval-Augmented Generation (RAG) using both standard semantic similarity and singular chunk analysis.
-   - **Nebius AI** backend: Llama 3.3, Kimi 2.5, OpenAI OSS 120B via cloud API (requires `NEBIUS_API_KEY`).
+   - **Scaleway** backend: Llama 3.3, Kimi 2.5, OpenAI OSS 120B via cloud API (requires `SCALEWAY_API_KEY`).
    - **Ollama** backend: any locally installed model (e.g. `qwen2.5:7b`), fully on-premise. Switch between backends from the sidebar toggle.
 
 4. **Corpus Analysis (`/analyze corpus/`)**
@@ -31,7 +31,7 @@ CogMaps is a sophisticated knowledge management and exploration application buil
    - Near-duplicate detection: only document pairs with cosine similarity ≥ 0.99 are surfaced, each flagged as **near-duplicate** and ranked by descending score.
 
 5. **Ontology Building & Exploration (`/build ontology/`, `/explore ontology/`)**
-   - Builds an OWL/RDFS ontology from documents already in Qdrant: a Nebius tool-calling agent drives [OLAF](https://github.com/merlin-intelligence/olaf) (MCP server) and stores the triples in **Oxigraph** (RDF triplestore, via Docker).
+   - Builds an OWL/RDFS ontology from documents already in Qdrant: a Scaleway tool-calling agent drives [OLAF](https://github.com/merlin-intelligence/olaf) (MCP server) and stores the triples in **Oxigraph** (RDF triplestore, via Docker).
    - Background jobs, like ingestion — an interrupted build can be re-launched and resumes where it stopped (processed chunks are skipped).
    - Optional **domain discovery**: a per-collection *domain blueprint* (inferred domain + taxonomical pillars), synthesized from a corpus sample or written by hand, tailors the agent's prompt. Opt-in per build.
    - Read-only explorer: browse every ontology stored in Oxigraph as a graph or raw Turtle, and run SPARQL queries.
@@ -54,7 +54,7 @@ cogmaps/                      importable package
 ├── config.py                 single source of truth for constants and env-based secrets
 ├── qdrant/                   Qdrant management — client, ingestion, retrieval, deletion (QdrantStore)
 ├── rag/                      RAG answer-generation — hybrid retrieval + LLM call (isolated
-│                             from the Chat page), Nebius/Ollama chat clients
+│                             from the Chat page), Scaleway/Ollama chat clients
 ├── graph/                    graph visualization — Qdrant-based BFS exploration + the
 │                             GraphExplorer pipeline (HTML graphs, eigenvalue plot, Excel
 │                             export); graph math itself lives in the `eigenmind` package

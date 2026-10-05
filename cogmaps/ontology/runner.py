@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 from qdrant_client import models
 
-from cogmaps.config import domain_discovery_model, nebius_api_key, oxigraph_url, qdrant_api_key
+from cogmaps.config import domain_discovery_model, oxigraph_url, qdrant_api_key, scaleway_api_key
 from cogmaps.ontology.agent import run_build
 from cogmaps.ontology.domain_discovery import discover_domain, load_blueprint
 from cogmaps.ontology.mcp_client import olaf_session
@@ -31,7 +31,6 @@ from cogmaps.ontology.olaf_config import (
 )
 from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
-from cogmaps.rag.llm_clients import resolve_nebius_endpoint
 
 __all__ = ["OntologyJobRunner", "final_export", "ttl_path_for"]
 
@@ -143,12 +142,6 @@ class OntologyJobRunner:
             with open(os.path.join(config_dir, "config.toml"), "w", encoding="utf-8") as f:
                 f.write(config_toml)
 
-            # litellm's api_base is the endpoint root (no trailing path), same
-            # convention as OpenAI's own api_base — strip the fixed suffix off
-            # the full chat-completions URL NebiusClient uses.
-            chat_url, _vendor = resolve_nebius_endpoint(job["llm_model"])
-            api_base = chat_url.removesuffix("/chat/completions")
-
             def export_cb(turtle: str) -> None:
                 out_path = ttl_path_for(collection)
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -187,8 +180,7 @@ class OntologyJobRunner:
                 await run_build(
                     session,
                     model=job["llm_model"],
-                    api_base=api_base,
-                    api_key=nebius_api_key(),
+                    api_key=scaleway_api_key(),
                     doc_filenames=job["doc_filenames"],
                     log=log,
                     set_progress=set_progress,
