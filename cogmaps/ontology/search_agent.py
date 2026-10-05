@@ -24,10 +24,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import litellm
 from mcp import ClientSession
 
 from cogmaps.config import oxigraph_url, qdrant_api_key
+from cogmaps.core.llm_impacts import tracked_completion
 from cogmaps.ontology.agent import _compact_history, _summarise, mcp_tools_to_litellm
 from cogmaps.ontology.mcp_client import olaf_session
 from cogmaps.ontology.olaf_config import build_config_toml
@@ -195,7 +195,7 @@ async def _run_loop(
 ) -> str:
     async def complete(tool_choice: str):
         return await asyncio.to_thread(
-            litellm.completion,
+            tracked_completion,
             model=f"scaleway/{model}",
             api_key=api_key,
             messages=messages,

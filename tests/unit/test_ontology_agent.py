@@ -10,6 +10,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import litellm
+
 import cogmaps.ontology.agent as agent_mod
 import cogmaps.ontology.runner as runner_mod
 from cogmaps.ontology.agent import run_build
@@ -79,7 +81,7 @@ def _script_completions(monkeypatch, responses: list):
         sent.append(list(kwargs["messages"]))
         return next(it)
 
-    monkeypatch.setattr(agent_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
     return sent
 
 

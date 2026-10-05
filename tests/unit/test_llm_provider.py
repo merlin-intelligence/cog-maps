@@ -147,7 +147,7 @@ def test_scaleway_client_uses_the_native_litellm_provider(monkeypatch):
         captured.update(kwargs)
         return ModelResponse(choices=[Choices(finish_reason="stop", index=0, message=Message(content="hi"))])
 
-    monkeypatch.setattr("cogmaps.rag.llm_clients.litellm.completion", fake_completion)
+    monkeypatch.setattr("litellm.completion", fake_completion)
     client.chat("sys", "q")
     assert captured["model"] == "scaleway/glm-5.2"
     assert captured["api_key"] == "k"
@@ -163,7 +163,7 @@ def _fake_completion_response(message: dict, finish_reason: str = "stop") -> Mod
 
 def _scaleway_reply(monkeypatch, message, finish_reason="stop"):
     response = _fake_completion_response(message, finish_reason)
-    monkeypatch.setattr("cogmaps.rag.llm_clients.litellm.completion", lambda **kw: response)
+    monkeypatch.setattr("litellm.completion", lambda **kw: response)
     return ScalewayClient(model="glm-5.2", api_key="key")
 
 
@@ -188,5 +188,5 @@ def test_scaleway_client_explains_reasoning_that_ate_the_budget(monkeypatch):
 
 def test_ollama_client_strips_inline_think_block(monkeypatch):
     response = _fake_completion_response({"content": "<think>hmm</think>The answer."})
-    monkeypatch.setattr("cogmaps.rag.llm_clients.litellm.completion", lambda **kw: response)
+    monkeypatch.setattr("litellm.completion", lambda **kw: response)
     assert OllamaClient(model="qwen3:8b", host="http://localhost:11434").chat("sys", "q") == "The answer."

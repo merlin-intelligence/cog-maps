@@ -20,6 +20,7 @@ from collections.abc import Callable
 from qdrant_client import models
 
 from cogmaps.config import domain_discovery_model, oxigraph_url, qdrant_api_key, scaleway_api_key
+from cogmaps.core.llm_impacts import record_llm_impacts
 from cogmaps.ontology.agent import run_build
 from cogmaps.ontology.domain_discovery import discover_domain, load_blueprint
 from cogmaps.ontology.mcp_client import olaf_session
@@ -108,7 +109,10 @@ class OntologyJobRunner:
         while True:
             job_id = self._queue.get()
             try:
-                asyncio.run(self._run(job_id))
+                # Every LLM request of the build (discovery + agent loop) is kept
+                # with the job, for the page's impact footer.
+                with record_llm_impacts(lambda call, job_id=job_id: self.store.append_llm_call(job_id, call.to_dict())):
+                    asyncio.run(self._run(job_id))
             except Exception:  # noqa: BLE001
                 self.store.set_status(job_id, "failed")
                 self.store.append_log(job_id, f"Unexpected runner error:\n{traceback.format_exc()}")

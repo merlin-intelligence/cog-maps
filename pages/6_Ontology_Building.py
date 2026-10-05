@@ -7,6 +7,7 @@ import uuid
 import streamlit as st
 
 from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, TEMP_GRAPH_OUTPUTS, domain_discovery_model, oxigraph_url
+from cogmaps.core.llm_impacts import LLMCallImpact, record_llm_impacts
 from cogmaps.ontology.domain_discovery import (
     DomainBlueprint,
     DomainPillar,
@@ -25,7 +26,13 @@ from cogmaps.ontology.runner import OntologyJobRunner
 from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import check_password, is_admin, list_visible_collections
-from cogmaps.ui.components import empty_state, render_sidebar, section_header
+from cogmaps.ui.components import (
+    empty_state,
+    render_llm_impacts_footer,
+    render_sidebar,
+    section_header,
+    session_llm_calls,
+)
 from cogmaps.ui.styles import apply_global_styles
 
 # ── Module-level singletons (one per server process, shared across sessions) ──
@@ -182,7 +189,8 @@ def _run_discovery() -> None:
         return
     with st.spinner(f"Profiling corpus and synthesizing domain pillars with {_discovery_model}..."):
         try:
-            discover_domain(store, qdrant_col, model=_discovery_model, force=True)
+            with record_llm_impacts(session_llm_calls("ontology_building").append):
+                discover_domain(store, qdrant_col, model=_discovery_model, force=True)
         except Exception as err:  # noqa: BLE001
             st.error(f"Domain discovery failed: {err}")
             return
@@ -481,3 +489,19 @@ if ttl:
             st.error(f"Could not render the graph view: {e}")
 else:
     empty_state("🧬", "No ontology built yet for this collection — launch a build above.")
+
+
+# ── LLM impacts footer ────────────────────────────────────────────────
+
+@st.fragment(run_every=5.0)
+def _render_llm_impacts() -> None:
+    """This session's discovery requests plus the active build job's (refreshed while it runs)."""
+    calls = list(session_llm_calls("ontology_building"))
+    job_id = st.session_state.get("ontology_active_job_id")
+    if job_id:
+        calls += [LLMCallImpact.from_dict(d) for d in _ontology_job_store().get_llm_calls(job_id)]
+    calls.sort(key=lambda c: c.timestamp)
+    render_llm_impacts_footer(calls, key="ontology_building")
+
+
+_render_llm_impacts()

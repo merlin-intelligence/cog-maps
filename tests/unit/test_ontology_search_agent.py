@@ -10,6 +10,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import litellm
 import pytest
 
 import cogmaps.ontology.search_agent as search_mod
@@ -64,7 +65,7 @@ def _script_completions(monkeypatch, responses: list):
             raise r
         return r
 
-    monkeypatch.setattr(search_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
     return sent
 
 

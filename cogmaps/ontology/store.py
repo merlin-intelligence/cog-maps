@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS ontology_job_logs (
     job_id  TEXT    NOT NULL,
     message TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ontology_job_llm_calls (
+    rowid     INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id    TEXT    NOT NULL,
+    call_json TEXT    NOT NULL
+);
 """
 
 
@@ -113,6 +119,22 @@ class OntologyJobStore:
                 "INSERT INTO ontology_job_logs (job_id, message) VALUES (?, ?)",
                 (job_id, message),
             )
+
+    def append_llm_call(self, job_id: str, call: dict) -> None:
+        """Record one LLM request made by the job (an ``LLMCallImpact.to_dict()``)."""
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "INSERT INTO ontology_job_llm_calls (job_id, call_json) VALUES (?, ?)",
+                (job_id, json.dumps(call)),
+            )
+
+    def get_llm_calls(self, job_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT call_json FROM ontology_job_llm_calls WHERE job_id=? ORDER BY rowid",
+                (job_id,),
+            ).fetchall()
+            return [json.loads(r["call_json"]) for r in rows]
 
     def get_job(self, job_id: str) -> dict | None:
         with self._conn() as conn:
