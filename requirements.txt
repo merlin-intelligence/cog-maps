@@ -26,7 +26,7 @@ python-dotenv
 eigenmind==0.1.1
 # OLAF's server.py uses the pre-2.0 low-level Server API (removed in mcp 2.0) — see pyproject.toml
 mcp<2.0.0
-olaf @ git+https://github.com/merlin-intelligence/olaf.git
+olaf @ git+https://github.com/merlin-intelligence/olaf.git@6b5a523a4ad825e1d38fa5957b440dd7c4d9e91a
 litellm
 rdflib
 

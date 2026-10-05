@@ -1,7 +1,7 @@
 """Unit tests for cogmaps.ontology.graph.build_pyvis_html: Turtle -> navigable pyvis graph."""
 from __future__ import annotations
 
-from cogmaps.ontology.graph import build_pyvis_html
+from cogmaps.ontology.graph import HIGHLIGHT_COLOR, build_pyvis_html, extract_subgraph
 
 _TTL = """
 @prefix : <http://olaf.local/ontology#> .
@@ -131,3 +131,91 @@ def test_build_pyvis_html_does_not_draw_owl_thing_as_a_node(tmp_path):
     assert "Root" in content
     assert "owl#Thing" not in content
     assert "rdf-schema#Resource" not in content
+
+
+# ── extract_subgraph: the part of the ontology an answer is about ─────────────
+
+_CHAIN_TTL = """
+@prefix : <http://olaf.local/ontology#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+:Thing2 a owl:Class ; rdfs:label "Far Away" .
+:Vehicle a owl:Class ; rdfs:label "Vehicle" ; rdfs:subClassOf :Thing2 .
+:Car a owl:Class ; rdfs:label "Car" ; rdfs:subClassOf :Vehicle .
+:Engine a owl:Class ; rdfs:label "Engine" .
+:Unrelated a owl:Class ; rdfs:label "Unrelated" .
+
+:hasEngine a owl:ObjectProperty ; rdfs:label "hasEngine" ;
+    rdfs:domain :Car ; rdfs:range :Engine .
+
+:TeslaModel3 a owl:NamedIndividual , :Car ; rdfs:label "Tesla Model 3" .
+:Car <urn:olaf:extractedFrom> <urn:olaf:chunk:chunk-42> .
+"""
+
+
+def _subjects(ttl: str) -> set[str]:
+    from rdflib import Graph
+
+    g = Graph()
+    g.parse(data=ttl, format="turtle")
+    return {str(s).rsplit("#", 1)[-1] for s in g.subjects()}
+
+
+def test_extract_subgraph_keeps_focus_and_direct_neighbors_only():
+    sub, focus = extract_subgraph(_CHAIN_TTL, ["http://olaf.local/ontology#Car"])
+    assert focus == {"http://olaf.local/ontology#Car"}
+    subjects = _subjects(sub)
+    # Car's parent, the individual typed Car, and the class it links through hasEngine.
+    assert {"Car", "Vehicle", "TeslaModel3", "Engine", "hasEngine"} <= subjects
+    assert "Unrelated" not in subjects
+    # Vehicle's own parent is two hops away: neither drawn nor kept as an edge target.
+    assert "Thing2" not in subjects
+    assert "Far Away" not in sub
+
+
+def test_extract_subgraph_without_neighbors_keeps_only_focus_nodes():
+    sub, _ = extract_subgraph(_CHAIN_TTL, ["http://olaf.local/ontology#Car"], neighbors=False)
+    subjects = _subjects(sub)
+    assert "Car" in subjects
+    assert "Vehicle" not in subjects
+    assert "TeslaModel3" not in subjects
+
+
+def test_extract_subgraph_drops_uris_that_are_not_ontology_entities():
+    _, focus = extract_subgraph(_CHAIN_TTL, [
+        "http://www.w3.org/2000/01/rdf-schema#label",
+        "urn:olaf:chunk:chunk-42",
+        "http://elsewhere.org/X",
+        "http://olaf.local/ontology#Engine",
+    ])
+    assert focus == {"http://olaf.local/ontology#Engine"}
+
+
+def test_extract_subgraph_brings_in_a_focus_property_domain_and_range():
+    sub, focus = extract_subgraph(
+        _CHAIN_TTL, ["http://olaf.local/ontology#hasEngine"], neighbors=False,
+    )
+    assert focus == {"http://olaf.local/ontology#hasEngine"}
+    assert {"Car", "Engine", "hasEngine"} <= _subjects(sub)
+
+
+def test_extract_subgraph_keeps_provenance_for_the_tooltip(tmp_path):
+    sub, _ = extract_subgraph(_CHAIN_TTL, ["http://olaf.local/ontology#Car"], neighbors=False)
+    out = tmp_path / "sub.html"
+    build_pyvis_html(sub, str(out))
+    assert "chunk-42" in out.read_text(encoding="utf-8")
+
+
+def test_extract_subgraph_with_no_focus_is_empty():
+    sub, focus = extract_subgraph(_CHAIN_TTL, [])
+    assert focus == set()
+    assert _subjects(sub) == set()
+
+
+def test_build_pyvis_html_highlights_focus_nodes(tmp_path):
+    out = tmp_path / "hl.html"
+    build_pyvis_html(_TTL, str(out), highlight={"http://olaf.local/ontology#Car"})
+    content = out.read_text(encoding="utf-8")
+    assert HIGHLIGHT_COLOR in content
+    assert content.count('"borderWidth": 4') == 1
