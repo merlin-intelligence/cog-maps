@@ -7,6 +7,7 @@ import re
 
 import streamlit as st
 
+from cogmaps.core.llm_impacts import record_llm_impacts
 from cogmaps.qdrant.store import QdrantStore
 from cogmaps.rag.llm_clients import build_llm_client
 from cogmaps.rag.pipeline import answer_question
@@ -18,8 +19,10 @@ from cogmaps.ui.components import (
     empty_state,
     get_embedder,
     load_nlp,
+    render_llm_impacts_footer,
     render_sidebar,
     section_header,
+    session_llm_calls,
 )
 from cogmaps.ui.styles import apply_global_styles, badge
 
@@ -175,7 +178,8 @@ def _run_query() -> None:
 
 
 if ask_btn and collection_name and prompt and sb.llm_ready:
-    _run_query()
+    with record_llm_impacts(session_llm_calls("chat").append):
+        _run_query()
 elif ask_btn and not sb.llm_ready:
     st.warning(
         "Ollama is offline or no model is selected."
@@ -184,3 +188,5 @@ elif ask_btn and not sb.llm_ready:
     )
 elif ask_btn:
     st.warning("Provide a collection and a question.")
+
+render_llm_impacts_footer(session_llm_calls("chat"), key="chat")

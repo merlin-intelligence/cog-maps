@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, TEMP_GRAPH_OUTPUTS, oxigraph_url
+from cogmaps.core.llm_impacts import record_llm_impacts
 from cogmaps.ontology.graph import build_pyvis_html, extract_subgraph
 from cogmaps.ontology.olaf_config import sanitize_ontology_id
 from cogmaps.ontology.oxigraph_client import (
@@ -22,7 +23,13 @@ from cogmaps.ontology.oxigraph_client import (
 from cogmaps.ontology.search_agent import SearchConversation, SearchTurn, ask_collection
 from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import check_password, list_visible_collections
-from cogmaps.ui.components import empty_state, render_sidebar, section_header
+from cogmaps.ui.components import (
+    empty_state,
+    render_llm_impacts_footer,
+    render_sidebar,
+    section_header,
+    session_llm_calls,
+)
 from cogmaps.ui.styles import apply_global_styles
 
 logger = logging.getLogger(__name__)
@@ -208,12 +215,13 @@ with tab_ask:
                 st.write(question)
             with st.status("searching the ontology…", expanded=True) as status:
                 try:
-                    turn = asyncio.run(ask_collection(
-                        conversation, question,
-                        qdrant_url=f"http://{sb.qdrant_host}:{sb.qdrant_port}",
-                        collection=qdrant_col, model=model, api_key=sb.scaleway_api_key,
-                        log=status.write,
-                    ))
+                    with record_llm_impacts(session_llm_calls("ontology_explorer").append):
+                        turn = asyncio.run(ask_collection(
+                            conversation, question,
+                            qdrant_url=f"http://{sb.qdrant_host}:{sb.qdrant_port}",
+                            collection=qdrant_col, model=model, api_key=sb.scaleway_api_key,
+                            log=status.write,
+                        ))
                     status.write("Building the answer's subgraph…")
                     state["views"].append(_turn_view(turn))
                 except Exception as e:  # noqa: BLE001
@@ -277,3 +285,5 @@ with tab_sparql:
                         st.dataframe(pd.DataFrame(rows), use_container_width=True)
             else:
                 st.code(payload, language="turtle")
+
+render_llm_impacts_footer(session_llm_calls("ontology_explorer"), key="ontology_explorer")

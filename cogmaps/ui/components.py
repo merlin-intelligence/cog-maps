@@ -24,6 +24,7 @@ from cogmaps.config import (
 )
 from cogmaps.config import scaleway_api_key as env_scaleway_key
 from cogmaps.core.embeddings import EmbeddingModel
+from cogmaps.core.llm_impacts import LLMCallImpact
 from cogmaps.ui.auth import (
     UserDBError,
     current_user,
@@ -299,3 +300,69 @@ def metric_card(label: str, value: str, sub: str = "", *, value_style: str = "")
         f'<div class="value"{style_attr}>{value}</div>'
         f'<div class="sub">{sub}</div></div>'
     )
+
+
+def session_llm_calls(page_key: str) -> list[LLMCallImpact]:
+    """This session's LLM requests on ``page_key`` — pass ``.append`` to ``record_llm_impacts``."""
+    return st.session_state.setdefault(f"llm_impacts_{page_key}", [])
+
+
+def _fmt(value: float | None, scale: float, unit: str) -> str:
+    return "—" if value is None else f"{value * scale:.3g} {unit}"
+
+
+def render_llm_impacts_footer(calls: list[LLMCallImpact], *, key: str) -> None:
+    """Page footer listing each LLM request and its EcoLogits impact estimate."""
+    st.markdown("---")
+    st.markdown(
+        '<p style="font-family:\'DM Mono\',monospace;font-size:0.68rem;'
+        'letter-spacing:0.15em;color:#8a6a50;text-transform:uppercase;'
+        'margin-bottom:0.5rem">🌱 environmental impact of LLM requests · EcoLogits</p>',
+        unsafe_allow_html=True,
+    )
+    if not calls:
+        st.caption("No LLM request made from this page yet.")
+        return
+
+    estimated = [c for c in calls if c.estimated]
+    totals = {
+        attr: sum(getattr(c, attr) for c in estimated)
+        for attr in ("energy_kwh", "gwp_kgco2eq", "wcf_l", "pe_mj")
+    }
+    cols = st.columns(4)
+    cols[0].markdown(metric_card("energy", _fmt(totals["energy_kwh"], 1e3, "Wh"),
+                                 f"{len(calls)} request(s)"), unsafe_allow_html=True)
+    cols[1].markdown(metric_card("GHG emissions", _fmt(totals["gwp_kgco2eq"], 1e3, "gCO₂eq"),
+                                 "global warming potential"), unsafe_allow_html=True)
+    cols[2].markdown(metric_card("water", _fmt(totals["wcf_l"], 1e3, "mL"),
+                                 "usage-phase consumption"), unsafe_allow_html=True)
+    cols[3].markdown(metric_card("primary energy", _fmt(totals["pe_mj"], 1e3, "kJ"),
+                                 "PE"), unsafe_allow_html=True)
+
+    st.dataframe(
+        [
+            {
+                "time": c.timestamp[11:19],
+                "model": c.model,
+                "tokens in": c.input_tokens,
+                "tokens out": c.output_tokens,
+                "latency": f"{c.latency_s:.1f} s",
+                "energy": _fmt(c.energy_kwh, 1e3, "Wh"),
+                "GHG": _fmt(c.gwp_kgco2eq, 1e3, "gCO₂eq"),
+                "water": _fmt(c.wcf_l, 1e3, "mL"),
+                "primary energy": _fmt(c.pe_mj, 1e3, "kJ"),
+                "ADPe": _fmt(c.adpe_kgsbeq, 1e3, "gSbeq"),
+            }
+            for c in reversed(calls)
+        ],
+        hide_index=True,
+        width="stretch",
+        key=f"llm_impacts_table_{key}",
+    )
+    caption = (
+        "Estimates from [EcoLogits](https://ecologits.ai) (usage + embodied hardware), "
+        "Scaleway Paris datacenter with the French electricity mix."
+    )
+    if len(estimated) < len(calls):
+        caption += " — : no estimate (local Ollama model or unknown model size)."
+    st.caption(caption)

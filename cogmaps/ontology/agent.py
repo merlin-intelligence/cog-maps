@@ -19,9 +19,9 @@ import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-import litellm
 from mcp import ClientSession
 
+from cogmaps.core.llm_impacts import tracked_completion
 from cogmaps.ontology.olaf_config import has_ontology_content
 from cogmaps.ontology.prompts import SYSTEM_PROMPT, build_system_prompt
 
@@ -179,7 +179,7 @@ async def run_build(
             log(f"Compacted {compacted} old tool result(s) to keep the context small.")
 
         response = await asyncio.to_thread(
-            litellm.completion,
+            tracked_completion,
             model=f"scaleway/{model}",
             api_key=api_key,
             messages=messages,

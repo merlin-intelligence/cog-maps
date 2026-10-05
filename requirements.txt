@@ -28,6 +28,7 @@ eigenmind==0.1.1
 mcp<2.0.0
 olaf @ git+https://github.com/merlin-intelligence/olaf.git@6b5a523a4ad825e1d38fa5957b440dd7c4d9e91a
 litellm
+ecologits
 rdflib
 
 # ── Optional: Google Drive connector (pyproject extra: gdrive) ──
