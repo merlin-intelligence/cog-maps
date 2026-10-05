@@ -255,7 +255,7 @@ def render_sidebar() -> SidebarState:
 
         st.markdown(
             '<p style="font-family:\'DM Mono\',monospace;font-size:0.6rem;'
-            'color:#a09080;text-align:center;margin-top:1rem;">© 2025 Prax Value Eurl</p>',
+            'color:#a09080;text-align:center;margin-top:1rem;">© 2026 Merlin Intelligence</p>',
             unsafe_allow_html=True,
         )
 
