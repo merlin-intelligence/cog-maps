@@ -39,6 +39,10 @@ dependencies = [
     "olaf @ git+https://github.com/merlin-intelligence/olaf.git@6b5a523a4ad825e1d38fa5957b440dd7c4d9e91a",
     "litellm",
     "ecologits",
+    # Langfuse tracing goes through litellm's "langfuse_otel" callback (OTLP/HTTP)
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
     "rdflib",
 ]
 

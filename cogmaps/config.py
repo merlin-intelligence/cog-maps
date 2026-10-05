@@ -189,6 +189,18 @@ def scaleway_api_key() -> str:
     return key
 
 
+def langfuse_enabled() -> bool:
+    """LLM tracing to Langfuse is on when both LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set.
+
+    LANGFUSE_HOST selects the instance (e.g. https://cloud.langfuse.com for the EU
+    cloud) — litellm falls back to the US cloud when it is unset.
+    """
+    return bool(
+        os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
+        and os.getenv("LANGFUSE_SECRET_KEY", "").strip()
+    )
+
+
 def domain_discovery_model() -> str:
     """Model used for domain discovery synthesis (fast, high throughput)."""
     return os.getenv("DOMAIN_DISCOVERY_MODEL", DEFAULT_DOMAIN_DISCOVERY_MODEL).strip() or DEFAULT_DOMAIN_DISCOVERY_MODEL
