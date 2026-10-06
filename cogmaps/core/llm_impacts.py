@@ -13,6 +13,9 @@ model name against its repository and silently picks unrelated models for the
 Scaleway ids (e.g. ``qwen3-235b-a22b-instruct-2507`` → ``gpt-35-turbo-instruct``).
 The models' parameter counts and Scaleway's datacenter figures are given
 explicitly instead, and fed to :func:`ecologits.impacts.llm.compute_llm_impacts`.
+
+When Langfuse keys are configured (see :func:`cogmaps.config.langfuse_enabled`),
+every request is also traced to Langfuse through litellm's ``langfuse_otel`` callback.
 """
 from __future__ import annotations
 
@@ -29,7 +32,12 @@ from ecologits.electricity_mix_repository import electricity_mixes
 from ecologits.impacts.llm import compute_llm_impacts
 from ecologits.utils.range_value import RangeValue
 
+from cogmaps.config import langfuse_enabled
+
 logger = logging.getLogger(__name__)
+
+if langfuse_enabled() and "langfuse_otel" not in litellm.callbacks:
+    litellm.callbacks.append("langfuse_otel")
 
 # (total, active) parameters in billions, per Scaleway model id. Dense models have
 # total == active. A model missing here is still recorded, without an estimate.
