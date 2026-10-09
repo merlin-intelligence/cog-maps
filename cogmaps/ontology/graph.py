@@ -34,6 +34,10 @@ HIGHLIGHT_COLOR = PROMPT_NODE_COLOR
 # URI (dedup/reuse) — only whatever this triple already holds is surfaced here.
 _EXTRACTED_FROM = URIRef("urn:olaf:extractedFrom")
 _CHUNK_URI_PREFIX = "urn:olaf:chunk:"
+# Marks, on a triple's rdf:Statement node, a triple materialized by OLAF's reasoner
+# (ontology_infer) — olaf.ontology.INFERRED_BY. Such a triple has no source chunk.
+_INFERRED_BY = URIRef("urn:olaf:inferredBy")
+INFERRED_EDGE_STYLE = {"dashes": [2, 6], "width": 1, "color": {"opacity": 0.45}}
 # Vocabulary terms (owl:Thing, rdfs:Resource…) are never drawn as nodes.
 _BUILTIN_NAMESPACES = (str(OWL), str(RDF), str(RDFS))
 
@@ -194,7 +198,26 @@ def extract_subgraph(ttl: str, uris: Iterable[str], *, neighbors: bool = True) -
             for p, o in g.predicate_objects(prop):
                 if keeps(prop, p, o):
                     sub.add((prop, p, o))
+    # Statement nodes of the triples between kept nodes, so that build_pyvis_html can
+    # still tell inferred triples (urn:olaf:inferredBy) from extracted ones.
+    for st in g.subjects(RDF.type, RDF.Statement):
+        if g.value(st, RDF.subject) in keep and g.value(st, RDF.object) in keep:
+            for p, o in g.predicate_objects(st):
+                sub.add((st, p, o))
     return sub.serialize(format="turtle"), {str(u) for u in focus}
+
+
+def inferred_triples(g: Graph) -> set[tuple[URIRef, URIRef, URIRef]]:
+    """Triples that are only there because the reasoner inferred them: described by a
+    statement node marked ``urn:olaf:inferredBy``, and by none carrying a source chunk."""
+    def described(statements) -> set:
+        return {
+            (g.value(st, RDF.subject), g.value(st, RDF.predicate), g.value(st, RDF.object))
+            for st in statements
+        }
+    marked = described(g.subjects(_INFERRED_BY, None))
+    extracted = described(st for st in g.subjects(_EXTRACTED_FROM, None) if (st, RDF.type, RDF.Statement) in g)
+    return marked - extracted
 
 
 def build_pyvis_html(
@@ -203,6 +226,7 @@ def build_pyvis_html(
     *,
     show_physics_controls: bool = True,
     highlight: Collection[str] = (),
+    show_inferred: bool = True,
 ) -> str:
     """Parse ``ttl`` and render a navigable pyvis graph to ``output_path``.
 
@@ -219,6 +243,10 @@ def build_pyvis_html(
 
     Nodes whose URI is in ``highlight`` get a thick :data:`HIGHLIGHT_COLOR`
     border and a larger size.
+
+    Edges materialized by the reasoner (see :func:`inferred_triples`) are drawn
+    dotted and faded, labeled "(inferred)" — or left out when ``show_inferred``
+    is False.
     """
     g = Graph()
     g.parse(data=ttl, format="turtle")
@@ -259,13 +287,24 @@ def build_pyvis_html(
                      shape="ellipse" if n in classes else "dot", **style)
 
     edges_added: set[tuple[str, str, str]] = set()
+    inferred = inferred_triples(g)
+
+    def add_edge(s, p, o, label: str) -> None:
+        key = (str(s), str(o), label)
+        if key in edges_added:
+            return
+        if (s, p, o) in inferred:
+            if show_inferred:
+                net.add_edge(str(s), str(o), label=f"{label} (inferred)", **INFERRED_EDGE_STYLE)
+        elif p == RDFS.subClassOf:
+            net.add_edge(str(s), str(o), label=label, dashes=True)
+        else:
+            net.add_edge(str(s), str(o), label=label)
+        edges_added.add(key)
 
     for s, o in g.subject_objects(RDFS.subClassOf):
         if s in nodes and isinstance(o, URIRef) and o in nodes:
-            key = (str(s), str(o), "subClassOf")
-            if key not in edges_added:
-                net.add_edge(str(s), str(o), label="subClassOf", dashes=True)
-                edges_added.add(key)
+            add_edge(s, RDFS.subClassOf, o, "subClassOf")
 
     for prop in object_properties:
         prop_label = _label(g, prop)
@@ -273,10 +312,7 @@ def build_pyvis_html(
         for s, o in g.subject_objects(prop):
             if isinstance(o, BNode) or s not in nodes or o not in nodes:
                 continue
-            key = (str(s), str(o), prop_label)
-            if key not in edges_added:
-                net.add_edge(str(s), str(o), label=prop_label)
-                edges_added.add(key)
+            add_edge(s, prop, o, prop_label)
         # 2. Schema domain -> range relations
         domain = g.value(prop, RDFS.domain)
         range_ = g.value(prop, RDFS.range)

@@ -36,7 +36,7 @@ dependencies = [
     # — capped here since OLAF's own "mcp>=1.0.0" has no upper bound and lets
     # pip resolve an incompatible 2.x otherwise.
     "mcp<2.0.0",
-    "olaf @ git+https://github.com/merlin-intelligence/olaf.git@6b5a523a4ad825e1d38fa5957b440dd7c4d9e91a",
+    "olaf @ git+https://github.com/merlin-intelligence/olaf.git@f62c827b40fa95b27f2fc6b6bfae2445acda1ec2",
     "litellm",
     "ecologits",
     # Langfuse tracing goes through litellm's "langfuse_otel" callback (OTLP/HTTP)

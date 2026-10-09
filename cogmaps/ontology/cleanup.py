@@ -23,6 +23,7 @@ concepts collection is ever created for a seed).
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterator
@@ -33,6 +34,7 @@ from cogmaps.config import qdrant_api_key as cfg_qdrant_api_key
 from cogmaps.ontology.domain_discovery import delete_blueprint
 from cogmaps.ontology.olaf_config import (
     CONCEPTS_COLLECTION_PREFIX,
+    backup_dir_for,
     build_config_toml,
     sanitize_ontology_id,
     ttl_path_for,
@@ -92,7 +94,8 @@ def ontology_exists_for(collection: str) -> bool:
 
 
 def delete_ontology_for_collection(collection: str, qdrant_host: str, qdrant_port: int) -> list[str]:
-    """Drop the Oxigraph ontology graph + its concepts Qdrant collection + cached .ttl export + domain blueprint.
+    """Drop the Oxigraph ontology graph + its concepts Qdrant collection + cached .ttl export
+    + reasoning backups + domain blueprint.
 
     Returns human-readable status lines for each step actually performed.
     Raises ``RuntimeError`` if the ``olaf drop`` subprocess itself fails.
@@ -117,6 +120,11 @@ def delete_ontology_for_collection(collection: str, qdrant_host: str, qdrant_por
     if os.path.exists(ttl_file):
         os.remove(ttl_file)
         messages.append("Cached Turtle export removed.")
+
+    backup_dir = backup_dir_for(collection)
+    if backup_dir.is_dir():
+        shutil.rmtree(backup_dir)
+        messages.append("Reasoning backups removed.")
 
     if delete_blueprint(collection):
         messages.append("Domain blueprint removed.")

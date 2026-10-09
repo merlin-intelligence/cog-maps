@@ -16,7 +16,8 @@
 
 1.  **Python 3.10+** installed.
 2.  **Docker** and the **Docker Compose** plugin installed (for Qdrant and Oxigraph). On WSL2, Docker Engine installed directly in the Linux distribution works as well as Docker Desktop.
-3.  **Tesseract OCR** (Optional, but recommended for processing scanned PDFs). OCR runs through ChunkNorris/PyMuPDF's integrated Tesseract — install the system Tesseract package and point `TESSDATA_PREFIX` at its `*.traineddata` files; no extra Python packages are required.
+3.  **Java 11+ runtime** (Optional, for the ontology reasoner on `/build ontology/`). OLAF runs the Pellet OWL reasoner as a Java subprocess — e.g. `sudo apt install default-jre-headless`. Without it, reasoning still runs the SPARQL integrity checks, but not the OWL consistency/satisfiability checks.
+4.  **Tesseract OCR** (Optional, but recommended for processing scanned PDFs). OCR runs through ChunkNorris/PyMuPDF's integrated Tesseract — install the system Tesseract package and point `TESSDATA_PREFIX` at its `*.traineddata` files; no extra Python packages are required.
 
 ---
 
@@ -191,6 +192,8 @@ docker run --rm -v qdrant_storage:/data:ro -v "$(pwd)":/backup \
   alpine tar czf /backup/qdrant_storage_$(date +%F).tar.gz -C /data .
 ```
 
+`docker-compose.yml` raises Qdrant's open-file limit (`ulimits.nofile`) to 65535: with Docker's default soft limit of 1024, Qdrant fails ingestion and ontology writes with `Too many open files (os error 24)` once a few collections exist. After changing it, recreate the container with `docker compose up -d qdrant` (a plain restart keeps the old limit).
+
 ### Ontology Building (`/build ontology/`) — Oxigraph + OLAF
 
 This page builds an OWL/RDFS ontology from a corpus already in Qdrant, using
@@ -246,7 +249,9 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   pip install --upgrade --force-reinstall --no-deps \
     "olaf @ git+https://github.com/merlin-intelligence/olaf.git@<sha>"
   ```
-  `--no-deps` avoids pip re-resolving `mcp` back to an incompatible version.
+  `--no-deps` avoids pip re-resolving `mcp` back to an incompatible version —
+  so install any dependency the new OLAF added yourself (the reasoner's
+  `owlready2`, which ships the Pellet jars: `pip install "owlready2>=0.46"`).
 - **Model** — the agent loop calls Scaleway through `litellm`'s native
   `scaleway/` provider (`model="scaleway/<name>"` + `api_key`, no `api_base`
   needed — litellm already knows Scaleway's endpoint), so `SCALEWAY_API_KEY`
@@ -291,6 +296,12 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   once they exceed 1,500 characters (chunk texts and bulk listings are the
   main culprits). The agent can call the tool again if it needs the full
   result. Tunables live at the top of `cogmaps/ontology/agent.py`.
+- **Hidden tools** — the build agent doesn't see OLAF's `ontology_check`,
+  `ontology_infer` and `entity_delete` (checking, inferring and deleting are
+  the reasoning job's, below) nor
+  `chunk_collection_switch` (the collection is fixed by the job's
+  `config.toml`); calls to them are refused (`HIDDEN_TOOLS` in
+  `cogmaps/ontology/agent.py`).
 - **Export** — intermediate `ontology_export` calls only overwrite the cached
   `.ttl` when they exclude seeds and actually declare at least one class,
   property or individual (checked by parsing the Turtle with `rdflib`). At the
@@ -298,6 +309,71 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   export fails or comes back empty, the named graph is read straight from
   Oxigraph instead. The graph view never draws OWL/RDF/RDFS vocabulary terms
   (`owl:Thing`, `rdfs:Resource`…) as nodes.
+
+#### Reasoning (curation & inference)
+
+Once an ontology exists, the **🧠 Reasoning** section of `/build ontology/`
+launches a background job (same runner, store and log view as builds — the
+`ontology_jobs.job_type` column tells them apart) running
+`cogmaps.ontology.reasoning_agent`, ported from OLAF's
+[`olaf_reasoning_agent`](https://github.com/merlin-intelligence/olaf/tree/main/demos/olaf_reasoning_agent)
+demo (prompts copied in `cogmaps.ontology.reasoning_prompts`). The code drives
+the run; a Scaleway tool-calling LLM only decides and applies the changes, one
+fresh conversation per task, with the context the code gathers itself (axioms
+at stake, entities with definitions, ancestors and restrictions, source chunk
+texts). Each step can be turned off on the page:
+
+1. **Merge duplicates** — pairs of classes whose OLAF concept embeddings are
+   ≥ 0.9 similar are reviewed: `concept_merge` or keep. Skipped (with a log
+   line) when OLAF's semantic index is unavailable.
+2. **Repair** — OLAF's `ontology_check` runs the Pellet OWL reasoner
+   (inconsistency, unsatisfiable classes, each with its explanation) and
+   closed-world SPARQL checks (subclass cycles, domain/range violations,
+   untyped individuals, property kind mismatches, unknown vocabulary terms such
+   as `rdfs:subClassof`); `ontology_orphans` lists isolated entities
+   (**also connect orphans** — connected only when the text says explicitly
+   what they are). Problems go 5 at a time to the LLM, which fixes them with
+   `relation_delete`/`relation_add`, `property_update`, `concept_update`,
+   `concept_merge`, `restriction_delete` or `entity_delete`; the check runs
+   again, up to **max rounds** (default 3), until nothing is left or nothing
+   changed.
+3. **Declare disjoint classes** (once consistent) — groups of sibling classes
+   are reviewed, and pairs that can never share an instance are declared
+   with `disjoint_add`. Disjointness is what lets the reasoner find
+   contradictions. The check runs again; a disjointness declared by the run
+   that shows up in an explanation is flagged (⚠) to the LLM as the likely
+   wrong axiom, with the triple to undo it.
+4. **Materialize inferences** (once consistent) — `ontology_infer` lists what
+   the ontology entails but does not assert (indirect superclasses, inherited
+   types, consequences of domains/ranges/equivalences…), each with why it
+   holds. With **review inferences first**, the LLM judges the axioms behind
+   each one — an absurd inference reveals a wrong axiom, which it deletes —
+   and the check runs again. The inferences are then written into the
+   ontology, each marked `<urn:olaf:inferredBy> "pellet"` on its reification
+   node, with no source chunk, replacing those of an earlier run.
+   `ontology_check` ignores them; the graph view draws them dotted
+   (**show inferences** toggle); the Ontology Explorer's search agent says
+   when an answer rests on one.
+
+The job's result shows the changes applied, duplicate candidates, disjoint
+pairs declared, inferences materialized, and the problem counts of every check.
+
+- **Java** — Pellet needs a Java 11+ runtime on the machine running
+  Streamlit (Prerequisites). Without it the reasoner reports an error, only
+  the SPARQL checks run (no inconsistency/unsatisfiability, no inference), and
+  the page says so. The build agent also declares disjointness while
+  extracting (`disjoint_add` in `cogmaps.ontology.prompts`), when the chunks
+  at hand make it clear; the reasoning step reviews all sibling classes.
+- **Backups** — before its first change, a run saves the ontology graph as
+  Turtle under `user_data/ontology/backups/<collection>/<date>-<time>.ttl`.
+  The **backups before reasoning** expander downloads one or restores it
+  (an HTTP graph-store `PUT` replacing `urn:olaf:{ontology_id}` in Oxigraph).
+  Restoring does not touch OLAF's concept index (`olaf_concepts_{id}`).
+  Every change is also logged with its full arguments. Backups are removed
+  along with the ontology by `/manage/`.
+- **Concurrency** — builds and reasoning runs share the runner's single
+  worker, so they never write to the same graph at once; the launch button
+  is disabled while a job runs on the collection.
 
 #### Domain discovery (optional)
 

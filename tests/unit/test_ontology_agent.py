@@ -356,3 +356,34 @@ def test_init_pending_chunks_makes_fresh_chunks_visible_to_olaf_pending_filter()
     by_id = {p.id: p.payload for p in client.retrieve("col", [1, 2, 3])}
     assert by_id[2][OLAF_STATUS_FIELD] == "processed"  # already-processed chunk untouched
     assert OLAF_STATUS_FIELD not in by_id[3]  # unselected document untouched
+
+
+def test_run_build_hides_and_refuses_check_tools(monkeypatch):
+    sent: list[dict] = []
+    responses = iter([_tool_response("ontology_check"), _text_response("Done.")])
+
+    def fake_completion(**kwargs):
+        sent.append({"tools": kwargs["tools"], "messages": list(kwargs["messages"])})
+        return next(responses)
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+
+    class _ToolsSession(_FakeSession):
+        async def list_tools(self):
+            names = ["concept_create", "disjoint_add", "ontology_check", "ontology_infer", "entity_delete",
+                     "chunk_collection_switch"]
+            return SimpleNamespace(tools=[SimpleNamespace(name=n, description="", inputSchema={}) for n in names])
+
+    session = _ToolsSession({"chunk_list": "[]"})
+    _run(session)
+
+    assert {t["function"]["name"] for t in sent[0]["tools"]} == {"concept_create", "disjoint_add"}
+    assert "ontology_check" not in [name for name, _ in session.calls]
+    refusal = sent[1]["messages"][-1]
+    assert refusal["role"] == "tool" and "not available" in refusal["content"]
+
+
+def test_system_prompt_asks_for_disjointness():
+    from cogmaps.ontology.prompts import SYSTEM_PROMPT
+
+    assert "**Disjointness** via `disjoint_add`" in SYSTEM_PROMPT

@@ -219,3 +219,41 @@ def test_build_pyvis_html_highlights_focus_nodes(tmp_path):
     content = out.read_text(encoding="utf-8")
     assert HIGHLIGHT_COLOR in content
     assert content.count('"borderWidth": 4') == 1
+
+
+_INFERRED_TTL = """
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex: <http://olaf.local/ontology#> .
+
+ex:Car a owl:Class ; rdfs:label "Car" ; rdfs:subClassOf ex:Vehicle .
+ex:Vehicle a owl:Class ; rdfs:label "Vehicle" ; rdfs:subClassOf ex:Artefact .
+ex:Artefact a owl:Class ; rdfs:label "Artefact" .
+ex:Car rdfs:subClassOf ex:Artefact .
+<urn:olaf:stmt:1> a rdf:Statement ; rdf:subject ex:Car ; rdf:predicate rdfs:subClassOf ;
+    rdf:object ex:Artefact ; <urn:olaf:inferredBy> "pellet" .
+"""
+
+
+def test_build_pyvis_html_draws_inferred_edges_dotted(tmp_path):
+    out = tmp_path / "graph.html"
+    build_pyvis_html(_INFERRED_TTL, str(out))
+    html = out.read_text(encoding="utf-8")
+    assert html.count('"label": "subClassOf (inferred)"') == 1
+    assert html.count('"label": "subClassOf"') == 2
+
+
+def test_build_pyvis_html_can_hide_inferred_edges(tmp_path):
+    out = tmp_path / "graph.html"
+    build_pyvis_html(_INFERRED_TTL, str(out), show_inferred=False)
+    html = out.read_text(encoding="utf-8")
+    assert "(inferred)" not in html
+    assert html.count('"label": "subClassOf"') == 2
+
+
+def test_extract_subgraph_keeps_inferred_marks(tmp_path):
+    sub, _ = extract_subgraph(_INFERRED_TTL, ["http://olaf.local/ontology#Car"])
+    out = tmp_path / "graph.html"
+    build_pyvis_html(sub, str(out))
+    assert "subClassOf (inferred)" in out.read_text(encoding="utf-8")

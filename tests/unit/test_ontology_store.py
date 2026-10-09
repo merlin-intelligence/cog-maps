@@ -154,6 +154,47 @@ def test_existing_db_without_discovery_column_is_migrated(tmp_path):
     conn.close()
 
     store = OntologyJobStore(str(db))
-    assert store.get_job("old")["use_domain_discovery"] is False
+    old = store.get_job("old")
+    assert old["use_domain_discovery"] is False
+    assert old["job_type"] == "build"
+    assert old["options"] == {}
+    assert old["result"] is None
     _create(store, "new")
     assert store.get_job("new")["use_domain_discovery"] is False
+
+
+def test_job_type_defaults_to_build(tmp_path):
+    store = _store(tmp_path)
+    _create(store, "j1")
+    job = store.get_job("j1")
+    assert job["job_type"] == "build"
+    assert job["options"] == {}
+    assert job["result"] is None
+
+
+def test_reasoning_job_options_and_result_round_trip(tmp_path):
+    store = _store(tmp_path)
+    store.create_job(
+        job_id="r1", collection="col", ontology_id="main", doc_filenames=[],
+        llm_provider="scaleway", llm_model="m", job_type="reasoning",
+        options={"max_rounds": 2, "fix_orphans": False},
+    )
+    store.set_result("r1", [{"label": "Round 1", "orphans": 3}])
+    job = store.get_job("r1")
+    assert job["job_type"] == "reasoning"
+    assert job["options"] == {"max_rounds": 2, "fix_orphans": False}
+    assert job["result"] == [{"label": "Round 1", "orphans": 3}]
+    assert store.latest_job_for("col")["job_type"] == "reasoning"
+
+
+def test_latest_job_for_can_filter_by_job_type(tmp_path):
+    store = _store(tmp_path)
+    store.create_job(
+        job_id="r1", collection="col", ontology_id="main", doc_filenames=[],
+        llm_provider="scaleway", llm_model="m", job_type="reasoning",
+    )
+    _create(store, "b1")  # created after the reasoning job: the latest overall
+    assert store.latest_job_for("col")["id"] == "b1"
+    assert store.latest_job_for("col", "reasoning")["id"] == "r1"
+    assert store.latest_job_for("col", "build")["id"] == "b1"
+    assert store.latest_job_for("other", "reasoning") is None

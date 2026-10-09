@@ -19,6 +19,8 @@ from cogmaps.ontology.graph import build_pyvis_html
 from cogmaps.ontology.olaf_config import (
     export_oxigraph_ontology_ttl,
     has_ontology_content,
+    list_backups,
+    restore_oxigraph_graph,
     sanitize_ontology_id,
     ttl_path_for,
 )
@@ -107,15 +109,96 @@ filenames = sorted(store.existing_filenames(qdrant_col))
 
 # ── Job helpers ───────────────────────────────────────────────────────
 
-def _activate_job(job_id: str) -> None:
-    st.session_state["ontology_active_job_id"] = job_id
-    st.session_state.pop("ontology_log_cursor", None)
-    st.session_state.pop("ontology_log_buffer", None)
+# Builds and reasoning runs each have their own active job, shown in their own
+# section of the page: "build" above the results, "reasoning" in the Reasoning section.
+_JOB_KINDS = {"build": "ontology build", "reasoning": "reasoning"}
+
+
+def _active_job_key(job_type: str) -> str:
+    return f"ontology_active_{job_type}_job_id"
+
+
+def _activate_job(job_id: str, job_type: str) -> None:
+    st.session_state[_active_job_key(job_type)] = job_id
+
+
+def _job_log(job_id: str) -> str:
+    """The job's log so far. Kept per job in the session, so each refresh only fetches
+    the new lines."""
+    key = f"ontology_log_{job_id}"
+    cursor, buf = st.session_state.get(key, (0, ""))
+    new_entries = _ontology_job_store().get_logs(job_id, after_rowid=cursor)
+    if new_entries:
+        rowids, messages = zip(*new_entries, strict=True)
+        cursor, buf = rowids[-1], buf + "\n".join(messages) + "\n"
+        st.session_state[key] = (cursor, buf)
+    return buf
+
+
+_PROBLEM_COLUMNS = {
+    "unsatisfiable": "unsatisfiable classes",
+    "cycles": "classes in subclass cycles",
+    "domain": "domain violations",
+    "range": "range violations",
+    "untyped": "untyped individuals",
+    "kind": "property kind mismatches",
+    "unknown_terms": "unknown vocabulary terms",
+    "orphans": "orphans",
+}
+
+
+def _render_reasoning_result(result: dict) -> None:
+    """What a reasoning run did: merges, disjointness, inferences, and the problem counts of
+    every check (before the fixes, after each round)."""
+    if isinstance(result, list):  # runs recorded before dedup/enrich/infer: the checks only
+        result = {"checks": result}
+    history = result.get("checks") or []
+    inferences = result.get("inferences")
+    cols = st.columns(4)
+    cols[0].metric("changes applied", result.get("changes", 0))
+    cols[1].metric("duplicate candidates", result.get("dedup_pairs", 0))
+    cols[2].metric("disjoint pairs declared", result.get("disjoint_added", 0))
+    cols[3].metric(
+        "inferences materialized",
+        "—" if not inferences or "materialized" not in inferences else inferences["materialized"],
+        help="Triples the reasoner entails but the ontology doesn't assert, written into it marked as "
+             "inferred (no source chunk). Shown as dotted edges in the graph view.",
+    )
+    if not history:
+        return
+    rows = [
+        {
+            "check": h["label"],
+            "consistent": "?" if h["consistent"] is None else ("yes" if h["consistent"] else "no"),
+            **{label: h.get(key, 0) for key, label in _PROBLEM_COLUMNS.items()},
+        }
+        for h in history
+    ]
+    st.dataframe(rows, hide_index=True, use_container_width=True)
+    if any(h.get("reasoner_error") for h in history):
+        st.warning(
+            "The OWL reasoner (Pellet) could not run — only the SPARQL integrity checks did. "
+            "It needs a Java 11+ runtime on the server; see the reasoning log for the error."
+        )
+
+
+def _job_to_show(job_type: str) -> str | None:
+    """The job a section's log window shows: the one launched from this session, if it is
+    about the selected collection, otherwise the collection's latest job of that type — so
+    a running job is picked up again, and a finished one's log is still there, after a
+    reload or a tab closure."""
+    job_id = st.session_state.get(_active_job_key(job_type))
+    if job_id:
+        job = _ontology_job_store().get_job(job_id)
+        if job and job["collection"] == qdrant_col:
+            return job_id
+    latest = _ontology_job_store().latest_job_for(qdrant_col, job_type)
+    return latest["id"] if latest else None
 
 
 @st.fragment(run_every=2.0)
-def _render_job_status() -> None:
-    job_id = st.session_state.get("ontology_active_job_id")
+def _render_job_status(job_type: str) -> None:
+    job_id = _job_to_show(job_type)
     if not job_id:
         return
     job = _ontology_job_store().get_job(job_id)
@@ -123,39 +206,49 @@ def _render_job_status() -> None:
         return
 
     status = job["status"]
+    is_reasoning = job_type == "reasoning"
     icons = {"pending": "⏳", "running": "⚙️", "done": "✅", "failed": "❌"}
-    st.markdown(f"**{icons.get(status, '·')} ontology build** — `{status}`")
+    st.markdown(
+        f"**{icons.get(status, '·')} {_JOB_KINDS[job_type]}** — `{status}` "
+        f"<span style='opacity:0.6'>· started {job['created_at'][:16].replace('T', ' ')} · {job['llm_model']}</span>",
+        unsafe_allow_html=True,
+    )
 
     cur, tot = job["progress_current"], job["progress_total"]
-    if tot > 0:
-        st.progress(min(cur / tot, 1.0))
-        st.caption(f"iteration {cur} / {tot}")
-    elif status == "running":
-        st.progress(0)
+    if status in ("pending", "running"):
+        st.progress(min(cur / tot, 1.0) if tot > 0 else 0)
+        if tot > 0:
+            st.caption(f"{'step' if is_reasoning else 'iteration'} {cur} / {tot}")
 
-    last_rowid = st.session_state.get("ontology_log_cursor", 0)
-    new_entries = _ontology_job_store().get_logs(job_id, after_rowid=last_rowid)
-    if new_entries:
-        rowids, messages = zip(*new_entries, strict=True)
-        st.session_state["ontology_log_cursor"] = rowids[-1]
-        buf = st.session_state.get("ontology_log_buffer", "")
-        st.session_state["ontology_log_buffer"] = buf + "\n".join(messages) + "\n"
-
-    buf = st.session_state.get("ontology_log_buffer", "")
-    if buf:
-        with st.expander("build log", expanded=(status == "running")):
-            st.code(buf.strip(), language=None)
+    log = _job_log(job_id)
+    if log:
+        with st.expander(f"{'reasoning' if is_reasoning else 'build'} log", expanded=(status == "running")):
+            # Fixed height: the log scrolls instead of pushing the page down.
+            with st.container(height=420):
+                st.code(log.strip(), language=None)
+            st.download_button(
+                "download log", log.encode("utf-8"),
+                file_name=f"{job_type}-{job['created_at'][:19].replace(':', '')}.log", mime="text/plain",
+                key=f"download_log_{job_id}",
+            )
 
     if status == "done":
-        st.success("Ontology build complete!")
-        if st.button("↻ view results"):
-            _show_results()
+        if is_reasoning:
+            st.success("Reasoning complete!")
+            _render_reasoning_result(job["result"] or {})
+        else:
+            st.success("Ontology build complete!")
     elif status == "failed":
-        st.error("Ontology build failed — see log above.")
+        st.error(f"{'Reasoning' if is_reasoning else 'Ontology build'} failed — see the log above.")
 
-    # Once per job, refresh the results section automatically when the build ends.
-    if status in ("done", "failed") and st.session_state.get("ontology_results_shown_for") != job_id:
-        st.session_state["ontology_results_shown_for"] = job_id
+    # Once per job, refresh the results section when it ends: the ontology changed. Only
+    # for a job watched while it ran — not for an old run shown again after a reload.
+    shown_key = "ontology_results_shown_for"
+    if status in ("pending", "running"):
+        st.session_state.setdefault("ontology_watched_jobs", set()).add(job_id)
+    elif job_id in st.session_state.get("ontology_watched_jobs", set()) and \
+            st.session_state.get(shown_key) != job_id:
+        st.session_state[shown_key] = job_id
         _show_results()
 
 
@@ -439,20 +532,10 @@ else:
                 use_domain_discovery=use_domain_discovery,
             )
             _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
-            _activate_job(job_id)
+            _activate_job(job_id, "build")
             st.rerun()
 
-# Reconnect banner: a build already running for this collection but this
-# session has no active job (e.g. reconnected after a tab closure).
-if "ontology_active_job_id" not in st.session_state:
-    latest = _ontology_job_store().latest_job_for(qdrant_col)
-    if latest and latest["status"] in ("running", "pending"):
-        st.info(f"A build is already running for **{collection_name}** (started {latest['created_at'][:16]}).")
-        if st.button("monitor this build"):
-            _activate_job(latest["id"])
-            st.rerun()
-
-_render_job_status()
+_render_job_status("build")
 
 st.markdown("---")
 
@@ -467,7 +550,120 @@ if ttl is None and os.path.exists(ttl_file):
     with open(ttl_file, encoding="utf-8") as f:
         ttl = f.read()
 
+def _render_reasoning() -> None:
+    """Launch the reasoning agent on the built ontology, and restore a pre-reasoning backup."""
+    with st.container(border=True):
+        st.markdown("#### 🧠 Reasoning")
+        st.caption(
+            "Curates the ontology with the Pellet OWL reasoner and an agent working from the source chunks: "
+            "merges duplicate classes, repairs logical problems (inconsistency, unsatisfiable classes, "
+            "subclass cycles, domain/range violations, untyped individuals, unknown terms, orphans), "
+            "declares disjoint sibling classes, then reviews what the ontology entails and writes it in, "
+            "marked as inferred. The ontology is backed up before the first change."
+        )
+        col_r1, col_r2 = st.columns(2)
+        with col_r1:
+            reasoning_model = st.selectbox("model (tool-calling)", ONTOLOGY_TOOLCALL_MODELS, key="reasoning_model")
+        with col_r2:
+            max_rounds = st.number_input(
+                "max rounds", min_value=1, max_value=10, value=3,
+                help="Check → fix → check again, up to this many times. The run stops early when "
+                     "nothing is left or a round changed nothing.",
+            )
+        col_o1, col_o2 = st.columns(2)
+        with col_o1:
+            dedup = st.checkbox(
+                "merge duplicates", value=True,
+                help="First, pairs of classes with near-identical labels/definitions are reviewed: merge or "
+                     "keep. Needs OLAF's concept embeddings; skipped otherwise.",
+            )
+            fix_orphans = st.checkbox(
+                "also connect orphans", value=True,
+                help="Classes and individuals with no relation to the rest of the ontology — connected only "
+                     "when the source text says explicitly what they are.",
+            )
+            enrich = st.checkbox(
+                "declare disjoint classes", value=True,
+                help="Once the ontology is consistent, sibling classes that can never share an instance are "
+                     "declared disjoint — what lets the reasoner detect contradictions. Checked again afterwards.",
+            )
+        with col_o2:
+            infer = st.checkbox(
+                "materialize inferences", value=True,
+                help="Once the ontology is consistent, what it entails but doesn't assert (indirect "
+                     "superclasses, inherited types, consequences of domains/ranges…) is written in, "
+                     "marked as inferred. Needs the OWL reasoner (Java).",
+            )
+            review = st.checkbox(
+                "review inferences first", value=True, disabled=not infer,
+                help="The agent reads each new inference with why it holds: an absurd one reveals a wrong "
+                     "axiom, which it fixes before anything is written. Unticked, inferences are written as is.",
+            )
+
+        latest = _ontology_job_store().latest_job_for(qdrant_col)
+        busy = latest is not None and latest["status"] in ("running", "pending")
+        if not sb.scaleway_api_key:
+            st.warning("Set SCALEWAY_API_KEY to run the reasoning agent (Scaleway tool-calling only).")
+        elif st.button("▶ launch reasoning", type="primary", disabled=busy,
+                       help="A job is already running for this collection." if busy else None):
+            job_id = str(uuid.uuid4())
+            _ontology_job_store().create_job(
+                job_id=job_id,
+                collection=qdrant_col,
+                ontology_id=ontology_id,
+                doc_filenames=[],
+                llm_provider="scaleway",
+                llm_model=reasoning_model,
+                job_type="reasoning",
+                options={
+                    "max_rounds": int(max_rounds), "fix_orphans": fix_orphans, "dedup": dedup,
+                    "enrich_disjointness": enrich, "infer": infer, "review_inferences": infer and review,
+                },
+            )
+            _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
+            _activate_job(job_id, "reasoning")
+            st.rerun()
+
+        _render_job_status("reasoning")
+
+        backups = list_backups(qdrant_col)
+        if backups:
+            with st.expander(f"backups before reasoning ({len(backups)})"):
+                labels = {
+                    f"{b.stem[:4]}-{b.stem[4:6]}-{b.stem[6:8]} {b.stem[9:11]}:{b.stem[11:13]}:{b.stem[13:15]}": b
+                    for b in backups
+                }
+                choice = st.selectbox("backup", list(labels))
+                backup_ttl = labels[choice].read_text(encoding="utf-8")
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    st.download_button(
+                        "download .ttl", backup_ttl.encode("utf-8"),
+                        file_name=f"{ontology_id}-{labels[choice].stem}.ttl", mime="text/turtle",
+                        use_container_width=True,
+                    )
+                with col_b2:
+                    if st.button("↺ restore this backup", disabled=busy, use_container_width=True):
+                        try:
+                            restore_oxigraph_graph(ontology_id, backup_ttl, oxigraph_url())
+                        except Exception as err:  # noqa: BLE001
+                            st.error(f"Restore failed: {err}")
+                        else:
+                            # Keep the on-disk fallback copy in step with Oxigraph.
+                            os.makedirs(os.path.dirname(ttl_file), exist_ok=True)
+                            with open(ttl_file, "w", encoding="utf-8") as f:
+                                f.write(backup_ttl)
+                            _oxigraph_ttl.clear()
+                            st.session_state["ontology_restore_flash"] = f"Ontology restored to the backup of {choice}."
+                            st.rerun()
+                st.caption("Restoring replaces the ontology graph in Oxigraph with the backup.")
+        if flash := st.session_state.pop("ontology_restore_flash", None):
+            st.success(flash)
+
+
 if ttl:
+    _render_reasoning()
+
     tab_raw, tab_graph = st.tabs(["🧬 raw RDF/OWL", "🕸 graph view"])
 
     with tab_raw:
@@ -481,8 +677,12 @@ if ttl:
         graph_dir = os.path.join(str(TEMP_GRAPH_OUTPUTS), "ontology")
         os.makedirs(graph_dir, exist_ok=True)
         graph_html_path = os.path.join(graph_dir, f"{ontology_id}.html")
+        show_inferred = st.toggle(
+            "show inferences", value=True,
+            help="Relations materialized by the reasoning step, drawn dotted.",
+        )
         try:
-            build_pyvis_html(ttl, graph_html_path)
+            build_pyvis_html(ttl, graph_html_path, show_inferred=show_inferred)
             with open(graph_html_path, encoding="utf-8") as f:
                 st.components.v1.html(f.read(), height=850, scrolling=True)
         except Exception as e:  # noqa: BLE001
@@ -495,11 +695,12 @@ else:
 
 @st.fragment(run_every=5.0)
 def _render_llm_impacts() -> None:
-    """This session's discovery requests plus the active build job's (refreshed while it runs)."""
+    """This session's discovery requests plus those of the jobs shown on the page — the
+    build and the reasoning run (refreshed while they run)."""
     calls = list(session_llm_calls("ontology_building"))
-    job_id = st.session_state.get("ontology_active_job_id")
-    if job_id:
-        calls += [LLMCallImpact.from_dict(d) for d in _ontology_job_store().get_llm_calls(job_id)]
+    for job_type in _JOB_KINDS:
+        if job_id := _job_to_show(job_type):
+            calls += [LLMCallImpact.from_dict(d) for d in _ontology_job_store().get_llm_calls(job_id)]
     calls.sort(key=lambda c: c.timestamp)
     render_llm_impacts_footer(calls, key="ontology_building")
 
