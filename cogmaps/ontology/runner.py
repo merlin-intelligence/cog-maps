@@ -1,4 +1,4 @@
-"""Daemon thread that processes ontology-building jobs from an in-memory queue.
+"""Daemon thread that processes ontology jobs (builds and reasoning runs) from an in-memory queue.
 
 Mirrors :class:`cogmaps.jobs.runner.JobRunner`'s shape (single worker thread,
 sequential processing) — here sequential also avoids concurrent writers to
@@ -28,8 +28,10 @@ from cogmaps.ontology.olaf_config import (
     build_config_toml,
     export_oxigraph_ontology_ttl,
     has_ontology_content,
+    save_backup,
     ttl_path_for,
 )
+from cogmaps.ontology.reasoning_agent import run_reasoning
 from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
 
@@ -88,7 +90,11 @@ async def final_export(
 
 
 class OntologyJobRunner:
-    """Single-worker background runner for ontology-building jobs."""
+    """Single-worker background runner for ontology jobs.
+
+    Builds and reasoning runs share the one worker, so they never write to the
+    same Oxigraph graph at the same time.
+    """
 
     def __init__(self, store: OntologyJobStore, qdrant_host: str, qdrant_port: int) -> None:
         self.store = store
@@ -133,24 +139,13 @@ class OntologyJobRunner:
             self.store.set_progress(job_id, current, total)
 
         collection = job["collection"]
+        if job.get("job_type") == "reasoning":
+            await self._run_reasoning(job, log, set_progress)
+            return
         config_dir = tempfile.mkdtemp(prefix=f"cogmaps_olaf_{job_id}_")
         try:
-            config_toml = build_config_toml(
-                qdrant_url=f"http://{self.qdrant_host}:{self.qdrant_port}",
-                qdrant_collection=collection,
-                qdrant_api_key=qdrant_api_key(),
-                oxigraph_url=oxigraph_url(),
-                ontology_id=job["ontology_id"],
-                ontology_name=collection,
-            )
-            with open(os.path.join(config_dir, "config.toml"), "w", encoding="utf-8") as f:
-                f.write(config_toml)
-
-            def export_cb(turtle: str) -> None:
-                out_path = ttl_path_for(collection)
-                os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                with open(out_path, "w", encoding="utf-8") as f:
-                    f.write(turtle)
+            self._write_config(config_dir, job)
+            export_cb = _ttl_writer(collection)
 
             # ── Domain discovery (optional, opted into per job) ──
             blueprint = None
@@ -199,3 +194,62 @@ class OntologyJobRunner:
             log(f"Fatal: {e}\n{traceback.format_exc()}")
         finally:
             shutil.rmtree(config_dir, ignore_errors=True)
+
+    async def _run_reasoning(self, job: dict, log: Callable[[str], None], set_progress) -> None:
+        """Curate the ontology with the reasoning agent: dedup, repair, enrich, infer."""
+        job_id, collection, options = job["id"], job["collection"], job["options"]
+        config_dir = tempfile.mkdtemp(prefix=f"cogmaps_olaf_{job_id}_")
+        try:
+            self._write_config(config_dir, job)
+
+            def backup_cb(turtle: str) -> None:
+                log(f"Backup of the ontology before any change: {save_backup(collection, turtle)}")
+
+            log(f"Starting OLAF reasoning (collection={collection!r}, ontology_id={job['ontology_id']!r})")
+            async with olaf_session(config_dir) as session:
+                summary = await run_reasoning(
+                    session,
+                    model=job["llm_model"],
+                    api_key=scaleway_api_key(),
+                    ontology_id=job["ontology_id"],
+                    log=log,
+                    set_progress=set_progress,
+                    backup_cb=backup_cb,
+                    export_cb=_ttl_writer(collection),
+                    max_rounds=options.get("max_rounds", 3),
+                    fix_orphans=options.get("fix_orphans", True),
+                    dedup=options.get("dedup", True),
+                    enrich_disjointness=options.get("enrich_disjointness", True),
+                    infer=options.get("infer", True),
+                    review_inferences=options.get("review_inferences", True),
+                )
+            self.store.set_result(job_id, summary)
+            self.store.set_status(job_id, "done")
+        except Exception as e:  # noqa: BLE001
+            self.store.set_status(job_id, "failed")
+            log(f"Fatal: {e}\n{traceback.format_exc()}")
+        finally:
+            shutil.rmtree(config_dir, ignore_errors=True)
+
+    def _write_config(self, config_dir: str, job: dict) -> None:
+        """Write the OLAF ``config.toml`` for this job's collection/ontology into ``config_dir``."""
+        config_toml = build_config_toml(
+            qdrant_url=f"http://{self.qdrant_host}:{self.qdrant_port}",
+            qdrant_collection=job["collection"],
+            qdrant_api_key=qdrant_api_key(),
+            oxigraph_url=oxigraph_url(),
+            ontology_id=job["ontology_id"],
+            ontology_name=job["collection"],
+        )
+        with open(os.path.join(config_dir, "config.toml"), "w", encoding="utf-8") as f:
+            f.write(config_toml)
+
+
+def _ttl_writer(collection: str) -> Callable[[str], None]:
+    """Callback persisting an exported Turtle to the collection's on-disk fallback copy."""
+    def export_cb(turtle: str) -> None:
+        out_path = ttl_path_for(collection)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(turtle)
+    return export_cb

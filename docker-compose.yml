@@ -12,6 +12,14 @@ services:
       - "127.0.0.1:6334:6334"
     environment:
       - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Set QDRANT_API_KEY in your .env file}
+    # Docker's default soft limit (1024 open files) is too low for Qdrant: each
+    # segment's RocksDB storage keeps many files open, and every client
+    # connection takes a descriptor too — past it, writes fail with
+    # "Too many open files (os error 24)".
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     volumes:
       - qdrant_storage:/qdrant/storage
 

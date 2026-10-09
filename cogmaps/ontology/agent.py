@@ -30,6 +30,13 @@ if TYPE_CHECKING:
 
 MAX_ITERATIONS = 150
 
+# OLAF tools hidden from the build agent, and refused if called anyway:
+# checking, inferring and deleting entities belong to the reasoning agent
+# (cogmaps.ontology.reasoning_agent), run after the build — Pellet is slow, and
+# its report would only distract the extraction — and the chunk collection is
+# fixed by the job's config.toml.
+HIDDEN_TOOLS = frozenset({"ontology_check", "ontology_infer", "entity_delete", "chunk_collection_switch"})
+
 # How many times in a row the model may stop while chunks are still pending
 # before the loop gives up (each nudge costs a full completion call).
 MAX_CONSECUTIVE_NUDGES = 3
@@ -153,7 +160,7 @@ async def run_build(
     tracks loop iterations for the page's progress bar.
     """
     tools_result = await session.list_tools()
-    tools = mcp_tools_to_litellm(tools_result.tools)
+    tools = mcp_tools_to_litellm([t for t in tools_result.tools if t.name not in HIDDEN_TOOLS])
     log(f"Loaded {len(tools)} OLAF tools.")
 
     active_prompt = system_prompt or (build_system_prompt(blueprint) if blueprint else SYSTEM_PROMPT)
@@ -243,12 +250,15 @@ async def run_build(
             log(f"Tool call: {tool_name}({_summarise(tool_args)})")
             total_tool_calls += 1
 
-            try:
-                result = await session.call_tool(tool_name, tool_args)
-                content = result.content[0].text if result.content else ""
-            except Exception as exc:  # noqa: BLE001
-                content = f"Error: {exc}"
-                log(f"  tool {tool_name} failed: {exc}")
+            if tool_name in HIDDEN_TOOLS:
+                content = f"Error: {tool_name} is not available while building."
+            else:
+                try:
+                    result = await session.call_tool(tool_name, tool_args)
+                    content = result.content[0].text if result.content else ""
+                except Exception as exc:  # noqa: BLE001
+                    content = f"Error: {exc}"
+                    log(f"  tool {tool_name} failed: {exc}")
 
             log(f"  -> {content[:200]}")
 

@@ -36,7 +36,7 @@ Your goal is an in-depth, high-density domain model. Do NOT stop after creating 
 4. **Process chunks systematically**
    - For each requested document (from user message), call `chunk_list` with `doc_id` and `status="pending"`. Only pending chunks need processing: chunks already marked processed were covered by a previous build — never re-read them. If a document has no pending chunks, move on to the next document.
    - Read batches of 5 to 10 chunks at a time using `chunk_read_batch(chunk_ids=[...])`.
-   - From each batch of chunks, extract what is relevant: concepts (`concept_create`), relationships (`property_create` and `relation_add`), and individuals (`individual_create`). Chunks with no domain content (bibliography, table of contents, boilerplate) need not produce anything.
+   - From each batch of chunks, extract what is relevant: concepts (`concept_create`), relationships (`property_create` and `relation_add`), individuals (`individual_create`), and disjointness between classes (`disjoint_add`). Chunks with no domain content (bibliography, table of contents, boilerplate) need not produce anything.
    - Call `chunk_mark_processed` for chunks after extracting from them.
    - Move through ALL pending chunks of ALL requested documents. Do NOT stop after only 1 or 2 documents!
    - Repeat until `chunk_list(status="pending")` returns an empty list for every requested document.
@@ -46,6 +46,15 @@ Your goal is an in-depth, high-density domain model. Do NOT stop after creating 
    - **Object properties** via `property_create`: Connect classes with meaningful relationships. Always specify `domain_uri` and `range_uri`.
    - **Subclass relations** via `relation_add` or `parent_uri` in `concept_create`.
    - **Individuals** via `individual_create` for specific people, agencies, named indices, and programs.
+   - **Disjointness** via `disjoint_add` — when sibling classes cannot share an instance.
+     Example: "Person", "Organisation" and "Document" are pairwise disjoint; "Bank" and
+     "Investment Fund" (both kinds of "Financial Institution") likely are too.
+     Only declare it when the classes truly exclude each other — never between a class and its
+     ancestor, and not for classes that merely look different but can overlap
+     (e.g. "Employee" and "Shareholder"). Disjointness is what lets the reasoner detect errors
+     later on: without it, a wrong `rdf:type` or `rdfs:subClassOf` goes unnoticed. (A review of
+     all sibling classes is done afterwards by the reasoning step — declare only what the chunks
+     at hand make clear.)
    - Never encode the same pair of entities both ways: if "Green Bond" is already
      `rdfs:subClassOf` "Financial Instrument", do not also add an object property like
      "implements" or "isTypeOf" between them (and vice versa). Pick one relation per pair.

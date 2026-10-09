@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS ontology_jobs (
     updated_at        TEXT NOT NULL,
     progress_current  INTEGER NOT NULL DEFAULT 0,
     progress_total    INTEGER NOT NULL DEFAULT 0,
-    use_domain_discovery INTEGER NOT NULL DEFAULT 0
+    use_domain_discovery INTEGER NOT NULL DEFAULT 0,
+    job_type          TEXT NOT NULL DEFAULT 'build',
+    options_json      TEXT NOT NULL DEFAULT '{}',
+    result_json       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS ontology_job_logs (
@@ -42,6 +45,15 @@ CREATE TABLE IF NOT EXISTS ontology_job_llm_calls (
     call_json TEXT    NOT NULL
 );
 """
+
+
+def _job_from_row(row: sqlite3.Row) -> dict:
+    job = dict(row)
+    job["doc_filenames"] = json.loads(job["doc_filenames_json"])
+    job["use_domain_discovery"] = bool(job["use_domain_discovery"])
+    job["options"] = json.loads(job["options_json"])
+    job["result"] = json.loads(job["result_json"]) if job["result_json"] else None
+    return job
 
 
 class OntologyJobStore:
@@ -61,6 +73,13 @@ class OntologyJobStore:
                 conn.execute(
                     "ALTER TABLE ontology_jobs ADD COLUMN use_domain_discovery INTEGER NOT NULL DEFAULT 0"
                 )
+            # ... and those created before reasoning jobs, the job_type column.
+            if "job_type" not in columns:
+                conn.execute("ALTER TABLE ontology_jobs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'build'")
+            if "options_json" not in columns:
+                conn.execute("ALTER TABLE ontology_jobs ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'")
+            if "result_json" not in columns:
+                conn.execute("ALTER TABLE ontology_jobs ADD COLUMN result_json TEXT")
             # On startup, any job that was 'running' or 'pending' was interrupted
             # by a server restart — mark them failed so they don't hang forever.
             conn.execute(
@@ -87,16 +106,22 @@ class OntologyJobStore:
         llm_provider: str,
         llm_model: str,
         use_domain_discovery: bool = False,
+        job_type: str = "build",
+        options: dict | None = None,
     ) -> None:
+        """``job_type`` is ``"build"`` (agent extracting the ontology from chunks) or
+        ``"reasoning"`` (agent repairing the logical problems of an existing ontology);
+        ``options`` holds the job type's own settings (e.g. a reasoning job's ``max_rounds``)."""
         now = datetime.now().isoformat()
         with self._lock, self._conn() as conn:
             conn.execute(
                 """INSERT INTO ontology_jobs
                    (id, status, collection, ontology_id, doc_filenames_json,
-                    llm_provider, llm_model, created_at, updated_at, use_domain_discovery)
-                   VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    llm_provider, llm_model, created_at, updated_at, use_domain_discovery, job_type, options_json)
+                   VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (job_id, collection, ontology_id, json.dumps(doc_filenames),
-                 llm_provider, llm_model, now, now, int(use_domain_discovery)),
+                 llm_provider, llm_model, now, now, int(use_domain_discovery), job_type,
+                 json.dumps(options or {})),
             )
 
     def set_status(self, job_id: str, status: str) -> None:
@@ -111,6 +136,14 @@ class OntologyJobStore:
             conn.execute(
                 "UPDATE ontology_jobs SET progress_current=?, progress_total=?, updated_at=? WHERE id=?",
                 (current, total, datetime.now().isoformat(), job_id),
+            )
+
+    def set_result(self, job_id: str, result) -> None:
+        """Store the job's JSON-serializable outcome (a reasoning job's problem counts per check)."""
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "UPDATE ontology_jobs SET result_json=?, updated_at=? WHERE id=?",
+                (json.dumps(result), datetime.now().isoformat(), job_id),
             )
 
     def append_log(self, job_id: str, message: str) -> None:
@@ -141,10 +174,7 @@ class OntologyJobStore:
             row = conn.execute("SELECT * FROM ontology_jobs WHERE id=?", (job_id,)).fetchone()
             if not row:
                 return None
-            job = dict(row)
-            job["doc_filenames"] = json.loads(job["doc_filenames_json"])
-            job["use_domain_discovery"] = bool(job["use_domain_discovery"])
-            return job
+            return _job_from_row(row)
 
     def get_logs(self, job_id: str, after_rowid: int = 0) -> list[tuple[int, str]]:
         """Return new log entries since after_rowid, as (rowid, message) pairs."""
@@ -155,15 +185,15 @@ class OntologyJobStore:
             ).fetchall()
             return [(r["rowid"], r["message"]) for r in rows]
 
-    def latest_job_for(self, collection: str) -> dict | None:
+    def latest_job_for(self, collection: str, job_type: str | None = None) -> dict | None:
+        """The collection's most recent job — of ``job_type`` only, when given."""
+        query = "SELECT * FROM ontology_jobs WHERE collection=?"
+        params: tuple = (collection,)
+        if job_type:
+            query += " AND job_type=?"
+            params += (job_type,)
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM ontology_jobs WHERE collection=? ORDER BY created_at DESC LIMIT 1",
-                (collection,),
-            ).fetchone()
+            row = conn.execute(f"{query} ORDER BY created_at DESC LIMIT 1", params).fetchone()
             if not row:
                 return None
-            job = dict(row)
-            job["doc_filenames"] = json.loads(job["doc_filenames_json"])
-            job["use_domain_discovery"] = bool(job["use_domain_discovery"])
-            return job
+            return _job_from_row(row)

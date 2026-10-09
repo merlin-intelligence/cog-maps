@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from rdflib import OWL, RDF, Graph
 
@@ -52,6 +54,46 @@ def ttl_path_for(collection: str) -> str:
     collection name as the ownership boundary.
     """
     return str(USER_DATA_DIR / "ontology" / f"{collection}.ttl")
+
+
+def backup_dir_for(collection: str) -> Path:
+    """Where the reasoning agent's pre-change Turtle backups of a collection's ontology go."""
+    return USER_DATA_DIR / "ontology" / "backups" / collection
+
+
+def save_backup(collection: str, ttl: str) -> Path:
+    """Write ``ttl`` as a new timestamped backup of the collection's ontology."""
+    directory = backup_dir_for(collection)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{time.strftime('%Y%m%d-%H%M%S')}.ttl"
+    path.write_text(ttl, encoding="utf-8")
+    return path
+
+
+def list_backups(collection: str) -> list[Path]:
+    """The collection's ontology backups, most recent first."""
+    directory = backup_dir_for(collection)
+    return sorted(directory.glob("*.ttl"), reverse=True) if directory.is_dir() else []
+
+
+def restore_oxigraph_graph(
+    ontology_id: str, ttl: str, oxigraph_url: str | None = None, *, timeout: float = 30,
+) -> None:
+    """Replace the ontology's named graph in Oxigraph with ``ttl`` (HTTP graph store PUT).
+
+    Only the graph is restored: OLAF's semantic index of concepts (the
+    ``olaf_concepts_*`` Qdrant collection) keeps what the reasoning run left
+    there, e.g. without the concepts it merged away.
+    """
+    endpoint = (oxigraph_url or default_oxigraph_url()).rstrip("/")
+    req = urllib.request.Request(
+        f"{endpoint}/store?graph=urn:olaf:{ontology_id}",
+        data=ttl.encode("utf-8"),
+        headers={"Content-Type": "text/turtle"},
+        method="PUT",
+    )
+    with urllib.request.urlopen(req, timeout=timeout):
+        pass
 
 
 def has_ontology_content(ttl: str | None) -> bool:
