@@ -107,6 +107,106 @@ def _freeze_physics_after_stabilization(path: str) -> None:
         f.write(content)
 
 
+def _add_search_box(path: str) -> None:
+    """Overlay a search field on the graph that zooms onto a concept or a relation.
+
+    Suggestions list every node label and every relation (edge label, without the
+    "(inferred)" suffix). Enter on a node name selects it and centers on it — Enter
+    again cycles through the other partial matches; on a relation name, every edge
+    carrying it is selected and the view fits their endpoints. Escape clears.
+    """
+    snippet = f"""<style>
+#cogmaps-search {{position:absolute;top:10px;left:10px;z-index:10;display:flex;gap:6px;
+  align-items:center;font-family:sans-serif;font-size:13px;}}
+#cogmaps-search input {{width:240px;padding:5px 8px;border:1px solid {GRAPH_EDGE_COLOR};
+  border-radius:6px;background:{GRAPH_BG_COLOR};color:{GRAPH_TEXT_COLOR};outline:none;}}
+#cogmaps-search span {{color:{GRAPH_TEXT_COLOR};opacity:0.7;}}
+</style>
+<div id="cogmaps-search">
+  <input list="cogmaps-search-options" placeholder="Search a concept or relation…" autocomplete="off">
+  <datalist id="cogmaps-search-options"></datalist>
+  <span></span>
+</div>
+<script>
+(function () {{
+  if (typeof network === "undefined") return;
+  var box = document.getElementById("cogmaps-search");
+  var input = box.querySelector("input"), status = box.querySelector("span");
+  var relationOf = function (e) {{ return (e.label || "").replace(/ \\(inferred\\)$/, ""); }};
+  var norm = function (s) {{ return (s || "").trim().toLowerCase(); }};
+
+  var options = document.getElementById("cogmaps-search-options");
+  var seen = {{}};
+  nodes.get().map(function (n) {{ return n.label; }})
+    .concat(edges.get().map(relationOf))
+    .forEach(function (label) {{
+      if (!label || seen[label]) return;
+      seen[label] = true;
+      var opt = document.createElement("option");
+      opt.value = label;
+      options.appendChild(opt);
+    }});
+
+  var lastQuery = null, matchIndex = 0;
+  var anim = {{ duration: 600, easingFunction: "easeInOutQuad" }};
+  // vis-network's animated moves can end off target, so each one is followed by the
+  // same move without animation, which lands exactly.
+  var snap = null;
+  function animate(move, view) {{
+    clearTimeout(snap);
+    move(Object.assign({{ animation: anim }}, view));
+    snap = setTimeout(function () {{ move(view); }}, anim.duration + 50);
+  }}
+  var moveTo = network.moveTo.bind(network), fit = network.fit.bind(network);
+
+  function search() {{
+    var q = norm(input.value);
+    if (!q) return;
+    matchIndex = q === lastQuery ? matchIndex + 1 : 0;
+    lastQuery = q;
+
+    var exactNodes = nodes.get({{ filter: function (n) {{ return norm(n.label) === q; }} }});
+    var relEdges = edges.get({{ filter: function (e) {{ return norm(relationOf(e)) === q; }} }});
+    if (!exactNodes.length && relEdges.length) {{
+      var ends = {{}};
+      relEdges.forEach(function (e) {{ ends[e.from] = true; ends[e.to] = true; }});
+      network.setSelection({{ nodes: [], edges: relEdges.map(function (e) {{ return e.id; }}) }});
+      animate(fit, {{ nodes: Object.keys(ends) }});
+      status.textContent = relEdges.length + " relation(s)";
+      return;
+    }}
+    var matches = exactNodes.length ? exactNodes
+      : nodes.get({{ filter: function (n) {{ return norm(n.label).indexOf(q) !== -1; }} }});
+    if (!matches.length) {{ status.textContent = "no match"; return; }}
+    var node = matches[matchIndex % matches.length];
+    network.selectNodes([node.id]);
+    animate(moveTo, {{ position: network.getPositions([node.id])[node.id], scale: 1.5 }});
+    status.textContent = matches.length > 1
+      ? (matchIndex % matches.length + 1) + "/" + matches.length + " — Enter for next" : "";
+  }}
+
+  input.addEventListener("keydown", function (ev) {{
+    if (ev.key === "Enter") {{ ev.preventDefault(); search(); }}
+    if (ev.key === "Escape") {{
+      input.value = ""; status.textContent = ""; lastQuery = null;
+      network.unselectAll();
+      animate(fit, {{}});
+    }}
+  }});
+  // Picking a suggestion from the list searches right away.
+  input.addEventListener("input", function (ev) {{
+    if (!ev.inputType || ev.inputType === "insertReplacementText") search();
+  }});
+}})();
+</script>
+"""
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    content = content.replace("</body>", snippet + "</body>", 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
 def _local_name(uri: URIRef) -> str:
     s = str(uri)
     return s.rsplit("#", 1)[-1].rsplit("/", 1)[-1]
@@ -326,5 +426,6 @@ def build_pyvis_html(
     net.set_options(json.dumps(_physics_options(show_physics_controls)))
     net.save_graph(output_path)
     _freeze_physics_after_stabilization(output_path)
+    _add_search_box(output_path)
     _remove_blank_card_chrome(output_path)
     return output_path

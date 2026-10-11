@@ -325,18 +325,29 @@ def render_llm_impacts_footer(calls: list[LLMCallImpact], *, key: str) -> None:
         return
 
     estimated = [c for c in calls if c.estimated]
+    # No estimate at all → "—", not a misleading 0. Some requests unestimated → the
+    # total only covers part of them, so it is a lower bound.
     totals = {
-        attr: sum(getattr(c, attr) for c in estimated)
+        attr: sum(getattr(c, attr) for c in estimated) if estimated else None
         for attr in ("energy_kwh", "gwp_kgco2eq", "wcf_l", "pe_mj")
     }
+    partial = estimated and len(estimated) < len(calls)
+
+    def total(attr: str, scale: float, unit: str) -> str:
+        text = _fmt(totals[attr], scale, unit)
+        return f"≥ {text}" if partial else text
+
+    requests = f"{len(calls)} request(s)"
+    if len(estimated) < len(calls):
+        requests += f" · {len(estimated)} estimated"
     cols = st.columns(4)
-    cols[0].markdown(metric_card("energy", _fmt(totals["energy_kwh"], 1e3, "Wh"),
-                                 f"{len(calls)} request(s)"), unsafe_allow_html=True)
-    cols[1].markdown(metric_card("GHG emissions", _fmt(totals["gwp_kgco2eq"], 1e3, "gCO₂eq"),
+    cols[0].markdown(metric_card("energy", total("energy_kwh", 1e3, "Wh"),
+                                 requests), unsafe_allow_html=True)
+    cols[1].markdown(metric_card("GHG emissions", total("gwp_kgco2eq", 1e3, "gCO₂eq"),
                                  "global warming potential"), unsafe_allow_html=True)
-    cols[2].markdown(metric_card("water", _fmt(totals["wcf_l"], 1e3, "mL"),
+    cols[2].markdown(metric_card("water", total("wcf_l", 1e3, "mL"),
                                  "usage-phase consumption"), unsafe_allow_html=True)
-    cols[3].markdown(metric_card("primary energy", _fmt(totals["pe_mj"], 1e3, "kJ"),
+    cols[3].markdown(metric_card("primary energy", total("pe_mj", 1e3, "kJ"),
                                  "PE"), unsafe_allow_html=True)
 
     st.dataframe(
