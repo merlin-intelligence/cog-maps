@@ -101,8 +101,14 @@ DOCUMENT_COLORS = [
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
 ]
 # Drawn from the app's brand palette (cogmaps/ui/styles.py), matching the
-# Singular/Hinge/Theta badge hues (.badge-singular/.badge-hinge/.badge-theta).
+# spectral_attention/semantic_bridge/supported_diversity badge hues.
 METHOD_COLORS = {
+    "spectral_attention": "#9a6010",
+    "SpectralAttention": "#9a6010",
+    "semantic_bridge":    "#2e6b3a",
+    "SemanticBridge":    "#2e6b3a",
+    "supported_diversity": "#4a7fa8",
+    "SupportedDiversity": "#4a7fa8",
     "Singular": "#9a6010",
     "Hinge":    "#2e6b3a",
     "Theta":    "#4a7fa8",

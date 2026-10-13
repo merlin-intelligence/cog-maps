@@ -41,9 +41,9 @@ def answer_question(
         c["source_type"] = "Similarity Search"
     retrieved = list(sim_chunks)
 
-    # 2. Graph retrieval (singular/hinge/theta) — only ranked_chunks is used
-    # below, so skip the pyvis HTML/Excel rendering (render_artifacts=False)
-    # that the Graph Explorer page needs but a chat answer doesn't.
+    # 2. Graph retrieval (spectral_attention/semantic_bridge/supported_diversity)
+    # — only ranked_chunks is used below, so skip pyvis HTML/Excel rendering
+    # (render_artifacts=False) that the Graph Explorer page needs but a chat answer doesn't.
     with tempfile.TemporaryDirectory() as tmp_dir:
         explorer = GraphExplorer(nlp, store=store, embedder=embedder)
         artifacts = explorer.explore(collection, prompt, output_dir=tmp_dir, render_artifacts=False)
@@ -52,12 +52,28 @@ def answer_question(
         for ch in artifacts.ranked_chunks:
             if added >= num_singular:
                 break
-            if not any(c["text"] == ch["text"] for c in retrieved):
+            existing = next((c for c in retrieved if c["text"] == ch["text"]), None)
+            if existing is not None:
+                existing_methods = list(existing.get("methods") or [])
+                for m in ch.get("methods", []):
+                    if m not in existing_methods:
+                        existing_methods.append(m)
+                existing["methods"] = existing_methods
+                methods_str = ", ".join(existing_methods)
+                existing["source_type"] = (
+                    f"Similarity Search + Graph ({methods_str})"
+                    if methods_str
+                    else "Similarity Search + Graph"
+                )
+                added += 1
+            else:
+                methods_str = ", ".join(ch.get("methods", []))
                 retrieved.append({
                     "text": ch["text"],
                     "filename": ch["filename"],
                     "chunk_number": ch["chunk_id"],
-                    "source_type": f"Singular ({', '.join(ch['methods'])})",
+                    "methods": ch.get("methods", []),
+                    "source_type": f"Graph ({methods_str})" if methods_str else "Graph",
                     "score": None,
                 })
                 added += 1

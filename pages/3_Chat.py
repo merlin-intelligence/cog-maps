@@ -65,12 +65,13 @@ with col_q1:
         unsafe_allow_html=True,
     )
     num_similar = st.slider("similarity chunks", 0, 20, 5)
-    num_singular = st.slider("singular chunks", 0, 20, 5)
+    num_singular = st.slider("graph chunks (spectral / bridge / diversity)", 0, 20, 5)
 
     short_model = sb.llm_model.split("/")[-1] if sb.llm_model else "—"
+    prov_display = "NL Research" if sb.llm_provider in ("nebius", "nl_research") else ("Scaleway" if sb.llm_provider == "scaleway" else sb.llm_provider)
     st.markdown(
         f'<p style="font-family:\'DM Mono\',monospace;font-size:0.7rem;color:#8a6a50">'
-        f'model: {short_model} · {sb.llm_provider}</p>',
+        f'model: {short_model} · {prov_display}</p>',
         unsafe_allow_html=True,
     )
 
@@ -82,11 +83,12 @@ with col_q2:
         help="Ask anything about your corpus. The system blends semantic search with graph analysis.",
     )
 
+    prov_label = "NL Research" if sb.llm_provider in ("nebius", "nl_research") else ("Scaleway" if sb.llm_provider == "scaleway" else sb.llm_provider.capitalize())
     not_ready_msg = (
         "⚠ Ollama is offline or no model is selected. Start the server "
         "(<code>ollama serve</code>) and pull a model (<code>ollama pull qwen2.5:7b</code>)."
         if sb.llm_provider == "ollama"
-        else "⚠ AI Hub API key is not configured. Please contact your administrator."
+        else f"⚠ {prov_label} API key is not configured. Please contact your administrator."
     )
     if not sb.llm_ready:
         st.markdown(
@@ -144,9 +146,19 @@ def _run_query() -> None:
                 unsafe_allow_html=True,
             )
             for i, c in enumerate(retrieved):
-                src = c["source_type"]
-                is_graph = any(k in src for k in ("Graph", "Singular", "Hinge", "Theta"))
-                badge_html = badge("graph" if is_graph else "sim")
+                src = c.get("source_type", "")
+                methods = c.get("methods", [])
+                badges = []
+                if "similarity" in src.lower():
+                    badges.append(badge("sim", text="Similarity"))
+                if methods:
+                    for m in methods:
+                        badges.append(badge(m))
+                elif any(k in src.lower() for k in ("graph", "singular", "hinge", "theta", "spectral", "bridge", "diversity")):
+                    badges.append(badge("graph", text="Graph"))
+                if not badges:
+                    badges.append(badge("sim", text="Similarity"))
+                badge_html = " ".join(badges)
                 with st.expander(f"[{i + 1}] {c['filename']} · chunk {c['chunk_number']}"):
                     st.markdown(
                         f'<p style="margin-bottom:0.5rem">{badge_html} '
@@ -181,10 +193,11 @@ if ask_btn and collection_name and prompt and sb.llm_ready:
     with record_llm_impacts(session_llm_calls("chat").append):
         _run_query()
 elif ask_btn and not sb.llm_ready:
+    prov_label = "NL Research" if sb.llm_provider in ("nebius", "nl_research") else ("Scaleway" if sb.llm_provider == "scaleway" else sb.llm_provider.capitalize())
     st.warning(
         "Ollama is offline or no model is selected."
         if sb.llm_provider == "ollama"
-        else "AI Hub API key is not configured. Please contact your administrator."
+        else f"{prov_label} API key is not configured. Please contact your administrator."
     )
 elif ask_btn:
     st.warning("Provide a collection and a question.")

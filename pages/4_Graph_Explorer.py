@@ -106,20 +106,23 @@ if st.button("▶ generate graph", type="primary"):
                     with tab_methods:
                         st.markdown(
                             f'<div class="info-box"><strong style="color:#2a1f18">Method colors:</strong>&nbsp;'
-                            f'{badge("Singular")} eigenvector poles &nbsp;'
-                            f'{badge("Hinge")} bridge nodes &nbsp;'
-                            f'{badge("Theta")} diverse coverage</div>',
+                            f'{badge("spectral_attention")} spectral attention &nbsp;'
+                            f'{badge("semantic_bridge")} semantic bridge &nbsp;'
+                            f'{badge("supported_diversity")} supported diversity</div>',
                             unsafe_allow_html=True,
                         )
                         with open(art.methods_html, "r", encoding="utf-8") as f:
                             st.components.v1.html(f.read(), height=900, scrolling=True)
 
                     with tab_eigen:
-                        st.image(art.eigenvalue_png, caption="Eigenvalues of the graph Laplacian")
+                        if art.eigenvalue_png and os.path.exists(art.eigenvalue_png):
+                            st.image(art.eigenvalue_png, caption="Eigenvalues of the graph Laplacian")
+                        else:
+                            st.info("Eigenvalue plot not generated.")
 
                     with tab_chunks:
                         for i, ch in enumerate(art.ranked_chunks):
-                            badges_html = "".join(badge(m.split(" ")[0]) for m in ch.get("methods", []))
+                            badges_html = " ".join(badge(m) for m in ch.get("methods", []))
                             label = (f"{i + 1}. {ch['filename']} · chunk {ch['chunk_id']} "
                                      f"· score {ch.get('count', 0)}/3")
                             with st.expander(label):

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from eigenmind import SimilarityGraph
+from eigenmind.graph_construction import quantile_threshold
 from pyvis.network import Network
 
 from cogmaps.config import (
@@ -189,7 +190,15 @@ class GraphExplorer:
         retrieved, initial_point_ids = explore_graph_with_initial_set(
             collection_name, query_vector, self.store.client, MAX_CHUNKS,
         )
-        graph = SimilarityGraph(retrieved)
+        if len(retrieved) > 2:
+            try:
+                raw_graph = SimilarityGraph(retrieved)
+                tau = max(0.65, quantile_threshold(raw_graph.C, 0.75))
+                graph = SimilarityGraph(retrieved, threshold=tau)
+            except Exception:
+                graph = SimilarityGraph(retrieved)
+        else:
+            graph = SimilarityGraph(retrieved)
 
         # 1. Main graph HTML
         main_html, document_colors = (
@@ -197,23 +206,37 @@ class GraphExplorer:
             if render_artifacts else ("", {})
         )
 
-        # 2. Eigenvalue analysis
-        base = os.path.join(output_dir, _generate_filename_from_prompt(prompt, ""))
-        eig_path, _ev_summary, singular_info = graph.eigenvalue_analysis(base)
-        singular_indices = set(singular_info.keys())
+        # 2. Eigenmind v1.8 selection mechanisms
+        spec_result = graph.spectral_attention()
+        spectral_indices = {c["index"] for c in spec_result.get("selected_chunks", [])}
 
-        # 3. Hinge ranking
-        ranking, _, _, _, _ = graph.hinge_ranking(pole_quantile=0.90)
-        hinge_indices = [r[0] for r in ranking[:10]]
+        bridge_result = graph.semantic_bridges(min_component_size=1)
+        bridge_chunks = bridge_result.get("selected_chunks", [])
+        bridge_indices = {c["index"] for c in bridge_chunks if "index" in c}
+        if not bridge_indices and bridge_result.get("component_bridges"):
+            for b in bridge_result["component_bridges"]:
+                if "source_chunk" in b and "index" in b["source_chunk"]:
+                    bridge_indices.add(b["source_chunk"]["index"])
+                if "target_chunk" in b and "index" in b["target_chunk"]:
+                    bridge_indices.add(b["target_chunk"]["index"])
 
-        # 4. Theta diversity
-        theta_indices = graph.theta_diversity(k=10)
+        div_result = graph.supported_diversity(budget=10)
+        diversity_indices = set(div_result.get("selected_indices", []))
 
-        # 5. Methods graph HTML
+        # Eigenvalue plot (generated when render_artifacts=True)
+        eig_path = ""
+        if render_artifacts:
+            base = os.path.join(output_dir, _generate_filename_from_prompt(prompt, ""))
+            try:
+                eig_path, _ev_summary, _ = graph.eigenvalue_analysis(base)
+            except Exception:
+                eig_path = ""
+
+        # 3. Methods graph HTML
         methods_html = (
             self._render_methods_graph(
                 graph, prompt, initial_point_ids,
-                singular_indices, hinge_indices, theta_indices,
+                spectral_indices, bridge_indices, diversity_indices,
                 output_dir,
             )
             if render_artifacts else ""
@@ -222,13 +245,17 @@ class GraphExplorer:
         if self._owns_embedder:
             self.embedder.release()
 
-        # 6. Consensus ranking
-        ranked_chunks = self._consensus_ranking(graph, singular_info, hinge_indices, theta_indices)
+        # 4. Consensus ranking
+        ranked_chunks = self._consensus_ranking(
+            graph, spectral_indices, bridge_indices, diversity_indices
+        )
         summary = self._format_summary(ranked_chunks)
 
-        # 7. Excel export
+        # 5. Excel export
         excel_path = (
-            self._export_excel(graph, singular_indices, hinge_indices, theta_indices, prompt, output_dir)
+            self._export_excel(
+                graph, spectral_indices, bridge_indices, diversity_indices, prompt, output_dir
+            )
             if render_artifacts else ""
         )
 
@@ -302,7 +329,7 @@ class GraphExplorer:
 
     def _render_methods_graph(
         self, graph: SimilarityGraph, prompt: str, initial_ids: set,
-        singular_indices: set, hinge_indices: list[int], theta_indices: list[int],
+        spectral_indices: set[int], bridge_indices: set[int], diversity_indices: set[int],
         output_dir: str,
     ) -> str:
         path = os.path.join(output_dir, _generate_filename_from_prompt(prompt, "_methods.html"))
@@ -314,7 +341,7 @@ class GraphExplorer:
                      font={"color": GRAPH_PROMPT_TEXT_COLOR, "size": 28},
                      widthConstraint={"minimum": 140}, heightConstraint={"minimum": 60})
 
-        relevant = singular_indices | set(hinge_indices) | set(theta_indices)
+        relevant = spectral_indices | bridge_indices | diversity_indices
         ordered_relevant = sorted(relevant)
 
         # Prune for visualization: keep top 3 neighbors per node, same idea as
@@ -338,14 +365,14 @@ class GraphExplorer:
 
         for idx in ordered_relevant:
             p = graph.id_to_point[graph.ordered_ids[idx]]
-            if idx in singular_indices: color = METHOD_COLORS["Singular"]
-            elif idx in hinge_indices:  color = METHOD_COLORS["Hinge"]
-            elif idx in theta_indices:  color = METHOD_COLORS["Theta"]
+            if idx in spectral_indices: color = METHOD_COLORS["spectral_attention"]
+            elif idx in bridge_indices: color = METHOD_COLORS["semantic_bridge"]
+            elif idx in diversity_indices: color = METHOD_COLORS["supported_diversity"]
             else: color = "#97c2fc"
             methods = []
-            if idx in singular_indices: methods.append("Singular")
-            if idx in hinge_indices: methods.append("Hinge")
-            if idx in theta_indices: methods.append("Theta")
+            if idx in spectral_indices: methods.append("spectral_attention")
+            if idx in bridge_indices: methods.append("semantic_bridge")
+            if idx in diversity_indices: methods.append("supported_diversity")
             # See _render_main_graph: pyvis titles render as HTML, so corpus
             # text must be escaped to avoid stored XSS.
             safe_filename = html.escape(str(p.payload.get("filename", "N/A")))
@@ -366,17 +393,16 @@ class GraphExplorer:
 
     def _consensus_ranking(
         self, graph: SimilarityGraph,
-        singular_info: dict, hinge_indices: list[int], theta_indices: list[int],
+        spectral_indices: set[int], bridge_indices: set[int], diversity_indices: set[int],
     ) -> list[dict]:
-        relevant = set(singular_info.keys()) | set(hinge_indices) | set(theta_indices)
+        relevant = spectral_indices | bridge_indices | diversity_indices
         out = []
         for idx in relevant:
             p = graph.id_to_point[graph.ordered_ids[idx]]
             methods_display = []
-            if idx in singular_info:
-                methods_display.append(f"Eigenvectors ({', '.join(singular_info[idx])})")
-            if idx in hinge_indices: methods_display.append("Hinge")
-            if idx in theta_indices: methods_display.append("Theta")
+            if idx in spectral_indices: methods_display.append("spectral_attention")
+            if idx in bridge_indices: methods_display.append("semantic_bridge")
+            if idx in diversity_indices: methods_display.append("supported_diversity")
             out.append({
                 "filename": p.payload.get("filename", "N/A"),
                 "text": p.payload.get("text", "N/A"),
@@ -385,7 +411,14 @@ class GraphExplorer:
                 "count": len(methods_display),
                 "themes": _extract_themes(p.payload.get("text", ""), self.nlp),
             })
-        out.sort(key=lambda c: c["count"], reverse=True)
+        out.sort(
+            key=lambda c: (
+                c["count"],
+                "semantic_bridge" in c["methods"],
+                "supported_diversity" in c["methods"],
+            ),
+            reverse=True,
+        )
         return out
 
     @staticmethod
@@ -403,7 +436,7 @@ class GraphExplorer:
     @staticmethod
     def _export_excel(
         graph: SimilarityGraph,
-        singular_indices: set, hinge_indices: list[int], theta_indices: list[int],
+        spectral_indices: set[int], bridge_indices: set[int], diversity_indices: set[int],
         prompt: str, output_dir: str,
     ) -> str:
         path = os.path.join(output_dir, _generate_filename_from_prompt(prompt, ".xlsx"))
@@ -411,9 +444,9 @@ class GraphExplorer:
         for idx, pid in enumerate(graph.ordered_ids):
             p = graph.id_to_point[pid]
             methods = []
-            if idx in singular_indices: methods.append("Singular")
-            if idx in hinge_indices: methods.append("Hinge")
-            if idx in theta_indices: methods.append("Theta")
+            if idx in spectral_indices: methods.append("spectral_attention")
+            if idx in bridge_indices: methods.append("semantic_bridge")
+            if idx in diversity_indices: methods.append("supported_diversity")
             sanitized = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", str(p.payload.get("text", "")))
             node_rows.append({
                 "Node ID": idx,
