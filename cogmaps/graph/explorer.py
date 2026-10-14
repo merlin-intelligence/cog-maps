@@ -193,7 +193,7 @@ class GraphExplorer:
         if len(retrieved) > 2:
             try:
                 raw_graph = SimilarityGraph(retrieved)
-                tau = max(0.65, quantile_threshold(raw_graph.C, 0.75))
+                tau = max(0.65, quantile_threshold(raw_graph.C, 0.88))
                 graph = SimilarityGraph(retrieved, threshold=tau)
             except Exception:
                 graph = SimilarityGraph(retrieved)
