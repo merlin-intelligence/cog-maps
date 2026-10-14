@@ -20,7 +20,11 @@ import numpy as np
 from pyvis.network import Network
 
 from cogmaps.config import NODE_BASE_SIZE, NODE_SIZE_MULTIPLIER
-from cogmaps.graph.explorer import _freeze_physics_after_stabilization, _scale_node_sizes
+from cogmaps.graph.explorer import (
+    _freeze_physics_after_stabilization,
+    _scale_node_sizes,
+    select_adaptive_threshold,
+)
 
 _MAX_SIZE = NODE_BASE_SIZE + NODE_SIZE_MULTIPLIER * 10
 
@@ -76,3 +80,43 @@ def test_freeze_physics_injects_a_setoptions_call_before_body_close(tmp_path):
     # the top level, so it's reachable from an appended <script> tag).
     assert html_content.index("network.setOptions({ physics: false })") < html_content.rindex("</body>")
     assert 'typeof network !== "undefined"' in html_content
+
+
+# ── select_adaptive_threshold ──────────────────────────────────────────
+
+def test_select_adaptive_threshold_small_matrix():
+    # <= 2 nodes defaults to 0.65 safely
+    assert select_adaptive_threshold(np.ones((2, 2))) == 0.65
+    assert select_adaptive_threshold(np.ones((1, 1))) == 0.65
+
+
+def test_select_adaptive_threshold_separates_dense_components():
+    # 30 nodes: 15 in cluster A (cosines ~0.95), 15 in cluster B (cosines ~0.95),
+    # between A and B cosines are 0.90.
+    n = 30
+    C = np.full((n, n), 0.90)
+    C[:15, :15] = 0.95
+    C[15:, 15:] = 0.95
+    np.fill_diagonal(C, 1.0)
+
+    tau = select_adaptive_threshold(C, min_components=2, max_dominant_ratio=0.85)
+    # Threshold must separate cluster A and cluster B (tau >= 0.90)
+    assert tau >= 0.90
+    W = np.where(C > tau, C, 0.0)
+    np.fill_diagonal(W, 0.0)
+    from scipy.sparse.csgraph import connected_components
+    n_comps, _ = connected_components(W, directed=False)
+    assert n_comps >= 2
+
+
+def test_select_adaptive_threshold_preserves_base_if_already_separated():
+    # 20 nodes with low inter-cluster similarity already separated at q=0.88
+    n = 20
+    C = np.full((n, n), 0.50)
+    C[:10, :10] = 0.85
+    C[10:, 10:] = 0.85
+    np.fill_diagonal(C, 1.0)
+
+    tau = select_adaptive_threshold(C, min_components=2)
+    assert tau >= 0.65
+

@@ -19,6 +19,7 @@ import pandas as pd
 from eigenmind import SimilarityGraph
 from eigenmind.graph_construction import quantile_threshold
 from pyvis.network import Network
+from scipy.sparse.csgraph import connected_components
 
 from cogmaps.config import (
     DOCUMENT_COLORS,
@@ -152,6 +153,47 @@ _METHODS_PHYSICS = {
 }
 
 
+def select_adaptive_threshold(
+    C: np.ndarray,
+    min_components: int = 3,
+    max_dominant_ratio: float = 0.85,
+    candidates: tuple[float, ...] = (0.88, 0.90, 0.92, 0.94, 0.95, 0.96),
+) -> float:
+    """Select an adaptive cosine threshold tau guaranteeing component separation.
+
+    Evaluates candidate quantiles to ensure the similarity graph splits into at
+    least ``min_components`` without being completely dominated by a single giant
+    component (> ``max_dominant_ratio`` of nodes). This guarantees that
+    ``semantic_bridges`` has distinct components to bridge across dense or sparse
+    collections.
+    """
+    n = len(C)
+    if n <= 2:
+        return 0.65
+    vals = np.asarray(C)[np.triu_indices(n, 1)]
+    target_comps = min(min_components, max(2, n // 2))
+    best_tau: float | None = None
+    for q in candidates:
+        tau = max(0.65, float(np.clip(np.quantile(vals, q), 0.0, 1 - 1e-12)))
+        W = np.where(C > tau, C, 0.0)
+        np.fill_diagonal(W, 0.0)
+        n_comps, labels = connected_components(W, directed=False)
+        sizes = np.bincount(labels)
+        max_size = int(np.max(sizes)) if len(sizes) > 0 else 0
+        if n_comps >= target_comps and max_size <= int(max_dominant_ratio * n):
+            logger.debug(
+                "Adaptive threshold selected: tau=%.4f (q=%.2f, comps=%d, max_comp=%d/%d)",
+                tau, q, n_comps, max_size, n,
+            )
+            return tau
+        if n_comps >= target_comps and best_tau is None:
+            best_tau = tau
+
+    if best_tau is not None:
+        return best_tau
+    return max(0.65, float(np.clip(np.quantile(vals, 0.88), 0.0, 1 - 1e-12)))
+
+
 class GraphExplorer:
     """Build the artifacts shown by the Graph Explorer page (HTMLs, plot, ranking, Excel)."""
 
@@ -193,7 +235,7 @@ class GraphExplorer:
         if len(retrieved) > 2:
             try:
                 raw_graph = SimilarityGraph(retrieved)
-                tau = max(0.65, quantile_threshold(raw_graph.C, 0.88))
+                tau = select_adaptive_threshold(raw_graph.C)
                 graph = SimilarityGraph(retrieved, threshold=tau)
             except Exception:
                 graph = SimilarityGraph(retrieved)
