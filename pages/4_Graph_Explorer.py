@@ -76,7 +76,7 @@ if st.button("▶ generate graph", type="primary"):
                         col_map[collection_name], prompt, output_dir=tmp_dir,
                     )
 
-                    st.success(f"✓ Subgraph built — {len(art.ranked_chunks)} singular chunks identified")
+                    st.success(f"✓ Subgraph built — {len(art.ranked_chunks)} graph chunks identified")
 
                     tab_graph, tab_methods, tab_eigen, tab_chunks, tab_dl = st.tabs([
                         "🕸 knowledge graph",

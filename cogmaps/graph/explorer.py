@@ -16,12 +16,21 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from eigenmind import SimilarityGraph
-from eigenmind.graph_construction import quantile_threshold
+from eigenmind import (
+    SimilarityGraph,
+    cosine_matrix,
+    normalize_embeddings,
+    quantile_threshold,
+    threshold_graph,
+)
+from eigenmind.defaults import SIMILARITY_THRESHOLD
+from matplotlib.figure import Figure
 from pyvis.network import Network
 from scipy.sparse.csgraph import connected_components
 
 from cogmaps.config import (
+    DIVERSITY_BUDGET,
+    DIVERSITY_TIME_LIMIT,
     DOCUMENT_COLORS,
     GRAPH_BG_COLOR,
     GRAPH_EDGE_COLOR,
@@ -162,23 +171,28 @@ def select_adaptive_threshold(
     """Select an adaptive cosine threshold tau guaranteeing component separation.
 
     Evaluates candidate quantiles to ensure the similarity graph splits into at
-    least ``min_components`` without being completely dominated by a single giant
-    component (> ``max_dominant_ratio`` of nodes). This guarantees that
-    ``semantic_bridges`` has distinct components to bridge across dense or sparse
-    collections.
+    least ``min_components`` components of two or more chunks, without being
+    completely dominated by a single giant component (> ``max_dominant_ratio``
+    of nodes). Isolated chunks are not counted: ``semantic_bridges`` excludes
+    them, so they would not give it anything to bridge. The threshold never
+    goes below eigenmind's default (``SIMILARITY_THRESHOLD``).
     """
     n = len(C)
     if n <= 2:
-        return 0.65
-    vals = np.asarray(C)[np.triu_indices(n, 1)]
+        return SIMILARITY_THRESHOLD
     target_comps = min(min_components, max(2, n // 2))
     best_tau: float | None = None
+    evaluated: set[float] = set()
     for q in candidates:
-        tau = max(0.65, float(np.clip(np.quantile(vals, q), 0.0, 1 - 1e-12)))
-        W = np.where(C > tau, C, 0.0)
-        np.fill_diagonal(W, 0.0)
-        n_comps, labels = connected_components(W, directed=False)
+        tau = max(SIMILARITY_THRESHOLD, quantile_threshold(C, q))
+        # Low-similarity collections clamp several candidates to the floor:
+        # evaluate each distinct tau once.
+        if tau in evaluated:
+            continue
+        evaluated.add(tau)
+        _, labels = connected_components(threshold_graph(C, tau), directed=False)
         sizes = np.bincount(labels)
+        n_comps = int(np.sum(sizes >= 2))
         max_size = int(np.max(sizes)) if len(sizes) > 0 else 0
         if n_comps >= target_comps and max_size <= int(max_dominant_ratio * n):
             logger.debug(
@@ -191,7 +205,46 @@ def select_adaptive_threshold(
 
     if best_tau is not None:
         return best_tau
-    return max(0.65, float(np.clip(np.quantile(vals, 0.88), 0.0, 1 - 1e-12)))
+    return max(SIMILARITY_THRESHOLD, quantile_threshold(C, 0.88))
+
+
+def _query_utilities(graph: SimilarityGraph, query_vector: list[float]) -> np.ndarray | None:
+    """Cosine of each chunk to the query, clipped at 0, as Supported Diversity utilities.
+
+    Without them eigenmind uses unit utilities, i.e. a pure cardinality
+    criterion that ignores the question. ``None`` (unit utilities) for an
+    empty graph or a zero query vector.
+    """
+    q = np.asarray(query_vector, dtype=float)
+    norm = np.linalg.norm(q)
+    if graph.n == 0 or norm == 0:
+        return None
+    return np.clip(graph.embedding_matrix @ (q / norm), 0.0, None)
+
+
+def _plot_laplacian_spectrum(graph: SimilarityGraph, output_filename_base: str) -> str:
+    """Save the first 20 eigenvalues of the normalized Laplacian as a PNG; return its path.
+
+    Replaces ``SimilarityGraph.eigenvalue_analysis``, removed in eigenmind 0.2.
+    Uses a bare ``Figure`` rather than pyplot, whose global state is not
+    thread-safe under Streamlit.
+    """
+    eigenvalues = np.linalg.eigvalsh(graph.laplacian())
+    zero_multiplicity = int(np.sum(eigenvalues < 1e-3))
+    n_to_plot = min(20, len(eigenvalues))
+    xs = range(1, n_to_plot + 1)
+
+    fig = Figure(figsize=(10, 6))
+    ax = fig.subplots()
+    ax.plot(xs, eigenvalues[:n_to_plot], "o-")
+    ax.set_title("Eigenvalues of the Graph Laplacian (Spectrum)")
+    ax.set_xlabel(f"Eigenvalue Index (Sorted) - First {zero_multiplicity} are near-zero")
+    ax.set_ylabel("Eigenvalue")
+    ax.set_xticks(list(xs))
+    ax.grid(True)
+    path = f"{output_filename_base}_eigenvalues.png"
+    fig.savefig(path)
+    return path
 
 
 class GraphExplorer:
@@ -228,19 +281,28 @@ class GraphExplorer:
         logger.info("Graph explore collection=%r prompt=%r", collection_name, prompt[:80])
         os.makedirs(output_dir, exist_ok=True)
 
-        query_vector = self.embedder.encode_query(prompt).tolist()
+        try:
+            query_vector = self.embedder.encode_query(prompt).tolist()
+        finally:
+            # The embedder is only needed for the query: free it before the
+            # graph work below, whatever happens there.
+            if self._owns_embedder:
+                self.embedder.release()
         retrieved, initial_point_ids = explore_graph_with_initial_set(
             collection_name, query_vector, self.store.client, MAX_CHUNKS,
         )
-        if len(retrieved) > 2:
-            try:
-                raw_graph = SimilarityGraph(retrieved)
-                tau = select_adaptive_threshold(raw_graph.C)
-                graph = SimilarityGraph(retrieved, threshold=tau)
-            except Exception:
-                graph = SimilarityGraph(retrieved)
-        else:
-            graph = SimilarityGraph(retrieved)
+        tau = SIMILARITY_THRESHOLD
+        if retrieved:
+            # C is computed again inside SimilarityGraph, but n <= MAX_CHUNKS
+            # keeps that cheap, and it avoids patching the graph's internals.
+            vectors = np.array([p.vector for p in retrieved], dtype=float)
+            tau = select_adaptive_threshold(cosine_matrix(normalize_embeddings(vectors)))
+        graph = SimilarityGraph(retrieved, threshold=tau)
+        # Components / isolates show when the threshold degenerates (one
+        # near-complete component, or many isolates that no method can select).
+        # summary() fails on an empty graph.
+        if graph.n > 0 and logger.isEnabledFor(logging.INFO):
+            logger.info("Similarity graph tau=%.4f %s", graph.threshold, graph.summary())
 
         # 1. Main graph HTML
         main_html, document_colors = (
@@ -248,31 +310,36 @@ class GraphExplorer:
             if render_artifacts else ("", {})
         )
 
-        # 2. Eigenmind v1.8 selection mechanisms
+        # 2. Eigenmind 0.2 selection mechanisms
         spec_result = graph.spectral_attention()
-        spectral_indices = {c["index"] for c in spec_result.get("selected_chunks", [])}
+        spectral_indices = {c["index"] for c in spec_result["selected_chunks"]}
 
-        bridge_result = graph.semantic_bridges(min_component_size=1)
-        bridge_chunks = bridge_result.get("selected_chunks", [])
-        bridge_indices = {c["index"] for c in bridge_chunks if "index" in c}
-        if not bridge_indices and bridge_result.get("component_bridges"):
-            for b in bridge_result["component_bridges"]:
-                if "source_chunk" in b and "index" in b["source_chunk"]:
-                    bridge_indices.add(b["source_chunk"]["index"])
-                if "target_chunk" in b and "index" in b["target_chunk"]:
-                    bridge_indices.add(b["target_chunk"]["index"])
+        # Default min_component_size (2): isolated chunks are noise to the
+        # graph, and bridging them would rank off-topic chunks first.
+        bridge_result = graph.semantic_bridges()
+        bridge_indices = {c["index"] for c in bridge_result["selected_chunks"]}
 
-        div_result = graph.supported_diversity(budget=10)
-        diversity_indices = set(div_result.get("selected_indices", []))
+        try:
+            div_result = graph.supported_diversity(
+                utilities=_query_utilities(graph, query_vector),
+                budget=DIVERSITY_BUDGET,
+                time_limit=DIVERSITY_TIME_LIMIT,
+            )
+            diversity_indices = set(div_result["selected_indices"])
+        except RuntimeError:
+            # The LP/MILP solver can fail numerically; the other two methods
+            # still give a usable ranking.
+            logger.warning("Supported Diversity failed; skipping it.", exc_info=True)
+            diversity_indices = set()
 
         # Eigenvalue plot (generated when render_artifacts=True)
         eig_path = ""
-        if render_artifacts:
+        if render_artifacts and graph.n > 0:
             base = os.path.join(output_dir, _generate_filename_from_prompt(prompt, ""))
             try:
-                eig_path, _ev_summary, _ = graph.eigenvalue_analysis(base)
+                eig_path = _plot_laplacian_spectrum(graph, base)
             except Exception:
-                eig_path = ""
+                logger.warning("Eigenvalue plot failed; skipping it.", exc_info=True)
 
         # 3. Methods graph HTML
         methods_html = (
@@ -283,9 +350,6 @@ class GraphExplorer:
             )
             if render_artifacts else ""
         )
-
-        if self._owns_embedder:
-            self.embedder.release()
 
         # 4. Consensus ranking
         ranked_chunks = self._consensus_ranking(

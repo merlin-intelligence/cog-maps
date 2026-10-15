@@ -25,12 +25,13 @@ def answer_question(
     collection: str,
     prompt: str,
     num_similar: int,
-    num_singular: int,
+    num_graph: int,
 ) -> AnswerResult:
     """Retrieve context (similarity search + graph exploration) and generate an answer.
 
-    Blends plain cosine-similarity retrieval with the Graph Explorer's ranked "singular"
-    chunks (eigenvector/hinge/theta consensus), then asks ``llm_client`` to answer
+    Blends plain cosine-similarity retrieval with up to ``num_graph`` new chunks from
+    the Graph Explorer's consensus ranking (spectral attention / semantic bridges /
+    supported diversity), then asks ``llm_client`` to answer
     ``prompt`` citing chunk numbers. ``llm_client`` exposes ``chat(system_prompt, user_content)``
     (see :mod:`cogmaps.rag.llm_clients`).
     """
@@ -50,8 +51,10 @@ def answer_question(
 
         added = 0
         for ch in artifacts.ranked_chunks:
-            if added >= num_singular:
-                break
+            # A chunk already retrieved by similarity only gains its graph
+            # methods: it doesn't count towards num_graph, which is the number
+            # of *new* chunks the graph contributes (relabelling still happens
+            # with num_graph=0).
             existing = next((c for c in retrieved if c["text"] == ch["text"]), None)
             if existing is not None:
                 existing_methods = list(existing.get("methods") or [])
@@ -65,8 +68,7 @@ def answer_question(
                     if methods_str
                     else "Similarity Search + Graph"
                 )
-                added += 1
-            else:
+            elif added < num_graph:
                 methods_str = ", ".join(ch.get("methods", []))
                 retrieved.append({
                     "text": ch["text"],

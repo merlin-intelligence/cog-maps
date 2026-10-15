@@ -1,8 +1,9 @@
 from unittest.mock import MagicMock, patch
+
 import numpy as np
 
-from cogmaps.rag.pipeline import answer_question
 from cogmaps.graph.explorer import ExplorerArtifacts
+from cogmaps.rag.pipeline import answer_question
 from cogmaps.ui.styles import badge
 
 
@@ -56,7 +57,7 @@ def test_answer_question_with_eigenmind_labels():
             collection="test_col",
             prompt="What is test?",
             num_similar=2,
-            num_singular=2,
+            num_graph=2,
         )
 
     assert result.answer == "This is an answer [Chunk 1] [Chunk 2]."
@@ -84,3 +85,57 @@ def test_answer_question_with_eigenmind_labels():
     b_div = badge("supported_diversity")
     assert "badge-supported-diversity" in b_div
     assert "supported_diversity" in b_div
+
+
+def test_overlapping_graph_chunks_do_not_use_up_num_graph():
+    # The top graph chunk is already a similarity hit: it is only relabelled,
+    # so num_graph=1 must still bring in one *new* chunk.
+    store = MagicMock()
+    store.similarity_search.return_value = [{"text": "Text 1", "filename": "a.pdf", "chunk_id": 0}]
+    embedder = MagicMock()
+    embedder.encode_query.return_value = np.zeros(128)
+    llm_client = MagicMock()
+    llm_client.chat.return_value = "answer"
+    artifacts = ExplorerArtifacts(
+        graph_html="", eigenvalue_png="", summary_text="", methods_html="", excel_path="",
+        ranked_chunks=[
+            {"text": "Text 1", "filename": "a.pdf", "chunk_id": 0, "methods": ["spectral_attention"]},
+            {"text": "Text 2", "filename": "b.pdf", "chunk_id": 1, "methods": ["semantic_bridge"]},
+        ],
+    )
+
+    with patch("cogmaps.rag.pipeline.GraphExplorer") as mock_explorer_cls:
+        mock_explorer_cls.return_value.explore.return_value = artifacts
+        result = answer_question(
+            store=store, embedder=embedder, nlp=MagicMock(), llm_client=llm_client,
+            collection="c", prompt="q", num_similar=1, num_graph=1,
+        )
+
+    assert [c["text"] for c in result.retrieved] == ["Text 1", "Text 2"]
+    assert result.retrieved[0]["methods"] == ["spectral_attention"]
+
+
+def test_similarity_chunks_are_relabelled_even_with_num_graph_zero():
+    store = MagicMock()
+    store.similarity_search.return_value = [{"text": "Text 1", "filename": "a.pdf", "chunk_id": 0}]
+    embedder = MagicMock()
+    embedder.encode_query.return_value = np.zeros(128)
+    llm_client = MagicMock()
+    llm_client.chat.return_value = "answer"
+    artifacts = ExplorerArtifacts(
+        graph_html="", eigenvalue_png="", summary_text="", methods_html="", excel_path="",
+        ranked_chunks=[
+            {"text": "Text 2", "filename": "b.pdf", "chunk_id": 1, "methods": ["semantic_bridge"]},
+            {"text": "Text 1", "filename": "a.pdf", "chunk_id": 0, "methods": ["spectral_attention"]},
+        ],
+    )
+
+    with patch("cogmaps.rag.pipeline.GraphExplorer") as mock_explorer_cls:
+        mock_explorer_cls.return_value.explore.return_value = artifacts
+        result = answer_question(
+            store=store, embedder=embedder, nlp=MagicMock(), llm_client=llm_client,
+            collection="c", prompt="q", num_similar=1, num_graph=0,
+        )
+
+    assert [c["text"] for c in result.retrieved] == ["Text 1"]
+    assert result.retrieved[0]["methods"] == ["spectral_attention"]

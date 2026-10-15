@@ -127,7 +127,7 @@ else:
     )
 
 st.markdown("---")
-ocr_html = (badge("Hinge", text="✓ OCR active")
+ocr_html = (badge("semantic_bridge", text="✓ OCR active")
             if ocr_available()
             else badge("sim", text="⚠ OCR inactive — check dependencies & TESSDATA_PREFIX"))
 st.markdown(f"<p>{ocr_html}</p>", unsafe_allow_html=True)

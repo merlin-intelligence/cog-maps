@@ -21,8 +21,8 @@ from cogmaps.config import (
     PROMPT_NODE_COLOR,
 )
 
-CLASS_COLOR = METHOD_COLORS["Theta"]
-INDIVIDUAL_COLOR = METHOD_COLORS["Hinge"]
+CLASS_COLOR = METHOD_COLORS["supported_diversity"]
+INDIVIDUAL_COLOR = METHOD_COLORS["semantic_bridge"]
 # Border of the nodes an Ontology Explorer answer is built on — same accent as
 # the prompt node on the Graph Explorer page.
 HIGHLIGHT_COLOR = PROMPT_NODE_COLOR

@@ -30,7 +30,7 @@ dependencies = [
     "python-dotenv",
     "scikit-learn",
     "wordcloud",
-    "eigenmind>=1.8.0",
+    "eigenmind==0.2.0",
     # OLAF's server.py uses the pre-2.0 low-level Server API
     # (@server.list_tools()/@server.call_tool() decorators, removed in mcp 2.0)
     # — capped here since OLAF's own "mcp>=1.0.0" has no upper bound and lets
