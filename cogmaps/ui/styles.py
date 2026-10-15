@@ -159,10 +159,11 @@ code, pre {
     font-family: var(--font-mono); font-size: 0.68rem;
     font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; margin-right: 4px;
 }
-.badge-singular { background: #fdf0e0; color: #9a6010; border: 1px solid #c4901844; }
-.badge-hinge    { background: #e8f4ea; color: #2e6b3a; border: 1px solid #3d7a4a44; }
-.badge-theta    { background: #e8eff5; color: #4a7fa8; border: 1px solid #4a7fa844; }
-.badge-sim      { background: #f0ece8; color: #6a5040; border: 1px solid #8a6a5044; }
+.badge-spectral-attention                 { background: #fdf0e0; color: #9a6010; border: 1px solid #c4901844; }
+.badge-semantic-bridge                    { background: #e8f4ea; color: #2e6b3a; border: 1px solid #3d7a4a44; }
+.badge-supported-diversity                { background: #e8eff5; color: #4a7fa8; border: 1px solid #4a7fa844; }
+.badge-sim                                { background: #f0ece8; color: #6a5040; border: 1px solid #8a6a5044; }
+.badge-graph                              { background: #ede8f5; color: #60408a; border: 1px solid #60408a44; }
 
 .hero-tagline {
     font-family: var(--font-mono); font-size: 0.78rem;
@@ -196,13 +197,16 @@ def apply_global_styles() -> None:
 def badge(label: str, text: str | None = None) -> str:
     """Return an HTML span for a method badge.
 
-    ``label`` selects the visual variant (Singular / Hinge / Theta / sim / graph).
+    ``label`` selects the visual variant (spectral_attention / semantic_bridge / supported_diversity / etc.).
     ``text`` overrides the displayed text — useful when reusing a variant's color
     scheme with arbitrary content (e.g. status indicators).
     """
-    cls = {
-        "Singular": "badge-singular",
-        "Hinge":    "badge-hinge",
-        "Theta":    "badge-theta",
-    }.get(label, "badge-sim")
+    cls_map = {
+        "spectral_attention": "badge-spectral-attention",
+        "semantic_bridge": "badge-semantic-bridge",
+        "supported_diversity": "badge-supported-diversity",
+        "sim": "badge-sim",
+        "graph": "badge-graph",
+    }
+    cls = cls_map.get(label, "badge-sim")
     return f'<span class="badge {cls}">{text if text is not None else label}</span>'

@@ -525,7 +525,7 @@ Navigate between pages from the Streamlit sidebar:
 | `pages/1_Ingest.py`         | `/enrich corpus/` - Build / extend a corpus from local dirs, Google Drive, SharePoint |
 | `pages/2_Corpus_Analysis.py`| `/analyze corpus/` - Inventory, sizes, wordcloud, embedding-based topic clustering (TF-IDF labels), pairwise semantic similarity |
 | `pages/3_Chat.py`           | `/ask/` - Hybrid RAG question answering against a selected collection |
-| `pages/4_Graph_Explorer.py` | `/explore graphs/` - Subgraph view (Singular / Hinge / Theta nodes) |
+| `pages/4_Graph_Explorer.py` | `/explore graphs/` - Subgraph view (Spectral Attention / Semantic Bridge / Supported Diversity nodes) |
 | `pages/5_Ontology_Explorer.py` | `/explore ontology/` - Ask questions over an ontology (search agent + subgraph + source chunks), browse it graphically, run read-only SPARQL queries |
 | `pages/6_Ontology_Building.py` | `/build ontology/` - Construct an OWL/RDFS ontology from selected documents via OLAF + Oxigraph |
 | `pages/7_Manage.py`         | `/manage/` - List & delete documents per ingestion date; delete collections/ontologies/seeds |

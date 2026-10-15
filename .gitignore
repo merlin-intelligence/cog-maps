@@ -218,5 +218,5 @@ docs/local/
 # Runtime and local cache directories (users.json, OAuth tokens, jobs.db,
 # domain blueprints, downloaded cloud documents, graph exports)
 user_data/
-downloaded_corpus/
+downloaded_corpus
 temp_graph_outputs/

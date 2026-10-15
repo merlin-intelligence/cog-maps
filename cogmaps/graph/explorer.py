@@ -16,10 +16,21 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from eigenmind import SimilarityGraph
+from eigenmind import (
+    SimilarityGraph,
+    cosine_matrix,
+    normalize_embeddings,
+    quantile_threshold,
+    threshold_graph,
+)
+from eigenmind.defaults import SIMILARITY_THRESHOLD
+from matplotlib.figure import Figure
 from pyvis.network import Network
+from scipy.sparse.csgraph import connected_components
 
 from cogmaps.config import (
+    DIVERSITY_BUDGET,
+    DIVERSITY_TIME_LIMIT,
     DOCUMENT_COLORS,
     GRAPH_BG_COLOR,
     GRAPH_EDGE_COLOR,
@@ -151,6 +162,91 @@ _METHODS_PHYSICS = {
 }
 
 
+def select_adaptive_threshold(
+    C: np.ndarray,
+    min_components: int = 3,
+    max_dominant_ratio: float = 0.85,
+    candidates: tuple[float, ...] = (0.88, 0.90, 0.92, 0.94, 0.95, 0.96),
+) -> float:
+    """Select an adaptive cosine threshold tau guaranteeing component separation.
+
+    Evaluates candidate quantiles to ensure the similarity graph splits into at
+    least ``min_components`` components of two or more chunks, without being
+    completely dominated by a single giant component (> ``max_dominant_ratio``
+    of nodes). Isolated chunks are not counted: ``semantic_bridges`` excludes
+    them, so they would not give it anything to bridge. The threshold never
+    goes below eigenmind's default (``SIMILARITY_THRESHOLD``).
+    """
+    n = len(C)
+    if n <= 2:
+        return SIMILARITY_THRESHOLD
+    target_comps = min(min_components, max(2, n // 2))
+    best_tau: float | None = None
+    evaluated: set[float] = set()
+    for q in candidates:
+        tau = max(SIMILARITY_THRESHOLD, quantile_threshold(C, q))
+        # Low-similarity collections clamp several candidates to the floor:
+        # evaluate each distinct tau once.
+        if tau in evaluated:
+            continue
+        evaluated.add(tau)
+        _, labels = connected_components(threshold_graph(C, tau), directed=False)
+        sizes = np.bincount(labels)
+        n_comps = int(np.sum(sizes >= 2))
+        max_size = int(np.max(sizes)) if len(sizes) > 0 else 0
+        if n_comps >= target_comps and max_size <= int(max_dominant_ratio * n):
+            logger.debug(
+                "Adaptive threshold selected: tau=%.4f (q=%.2f, comps=%d, max_comp=%d/%d)",
+                tau, q, n_comps, max_size, n,
+            )
+            return tau
+        if n_comps >= target_comps and best_tau is None:
+            best_tau = tau
+
+    if best_tau is not None:
+        return best_tau
+    return max(SIMILARITY_THRESHOLD, quantile_threshold(C, 0.88))
+
+
+def _query_utilities(graph: SimilarityGraph, query_vector: list[float]) -> np.ndarray | None:
+    """Cosine of each chunk to the query, clipped at 0, as Supported Diversity utilities.
+
+    Without them eigenmind uses unit utilities, i.e. a pure cardinality
+    criterion that ignores the question. ``None`` (unit utilities) for an
+    empty graph or a zero query vector.
+    """
+    q = np.asarray(query_vector, dtype=float)
+    norm = np.linalg.norm(q)
+    if graph.n == 0 or norm == 0:
+        return None
+    return np.clip(graph.embedding_matrix @ (q / norm), 0.0, None)
+
+
+def _plot_laplacian_spectrum(graph: SimilarityGraph, output_filename_base: str) -> str:
+    """Save the first 20 eigenvalues of the normalized Laplacian as a PNG; return its path.
+
+    Replaces ``SimilarityGraph.eigenvalue_analysis``, removed in eigenmind 0.2.
+    Uses a bare ``Figure`` rather than pyplot, whose global state is not
+    thread-safe under Streamlit.
+    """
+    eigenvalues = np.linalg.eigvalsh(graph.laplacian())
+    zero_multiplicity = int(np.sum(eigenvalues < 1e-3))
+    n_to_plot = min(20, len(eigenvalues))
+    xs = range(1, n_to_plot + 1)
+
+    fig = Figure(figsize=(10, 6))
+    ax = fig.subplots()
+    ax.plot(xs, eigenvalues[:n_to_plot], "o-")
+    ax.set_title("Eigenvalues of the Graph Laplacian (Spectrum)")
+    ax.set_xlabel(f"Eigenvalue Index (Sorted) - First {zero_multiplicity} are near-zero")
+    ax.set_ylabel("Eigenvalue")
+    ax.set_xticks(list(xs))
+    ax.grid(True)
+    path = f"{output_filename_base}_eigenvalues.png"
+    fig.savefig(path)
+    return path
+
+
 class GraphExplorer:
     """Build the artifacts shown by the Graph Explorer page (HTMLs, plot, ranking, Excel)."""
 
@@ -185,11 +281,28 @@ class GraphExplorer:
         logger.info("Graph explore collection=%r prompt=%r", collection_name, prompt[:80])
         os.makedirs(output_dir, exist_ok=True)
 
-        query_vector = self.embedder.encode_query(prompt).tolist()
+        try:
+            query_vector = self.embedder.encode_query(prompt).tolist()
+        finally:
+            # The embedder is only needed for the query: free it before the
+            # graph work below, whatever happens there.
+            if self._owns_embedder:
+                self.embedder.release()
         retrieved, initial_point_ids = explore_graph_with_initial_set(
             collection_name, query_vector, self.store.client, MAX_CHUNKS,
         )
-        graph = SimilarityGraph(retrieved)
+        tau = SIMILARITY_THRESHOLD
+        if retrieved:
+            # C is computed again inside SimilarityGraph, but n <= MAX_CHUNKS
+            # keeps that cheap, and it avoids patching the graph's internals.
+            vectors = np.array([p.vector for p in retrieved], dtype=float)
+            tau = select_adaptive_threshold(cosine_matrix(normalize_embeddings(vectors)))
+        graph = SimilarityGraph(retrieved, threshold=tau)
+        # Components / isolates show when the threshold degenerates (one
+        # near-complete component, or many isolates that no method can select).
+        # summary() fails on an empty graph.
+        if graph.n > 0 and logger.isEnabledFor(logging.INFO):
+            logger.info("Similarity graph tau=%.4f %s", graph.threshold, graph.summary())
 
         # 1. Main graph HTML
         main_html, document_colors = (
@@ -197,38 +310,58 @@ class GraphExplorer:
             if render_artifacts else ("", {})
         )
 
-        # 2. Eigenvalue analysis
-        base = os.path.join(output_dir, _generate_filename_from_prompt(prompt, ""))
-        eig_path, _ev_summary, singular_info = graph.eigenvalue_analysis(base)
-        singular_indices = set(singular_info.keys())
+        # 2. Eigenmind 0.2 selection mechanisms
+        spec_result = graph.spectral_attention()
+        spectral_indices = {c["index"] for c in spec_result["selected_chunks"]}
 
-        # 3. Hinge ranking
-        ranking, _, _, _, _ = graph.hinge_ranking(pole_quantile=0.90)
-        hinge_indices = [r[0] for r in ranking[:10]]
+        # Default min_component_size (2): isolated chunks are noise to the
+        # graph, and bridging them would rank off-topic chunks first.
+        bridge_result = graph.semantic_bridges()
+        bridge_indices = {c["index"] for c in bridge_result["selected_chunks"]}
 
-        # 4. Theta diversity
-        theta_indices = graph.theta_diversity(k=10)
+        try:
+            div_result = graph.supported_diversity(
+                utilities=_query_utilities(graph, query_vector),
+                budget=DIVERSITY_BUDGET,
+                time_limit=DIVERSITY_TIME_LIMIT,
+            )
+            diversity_indices = set(div_result["selected_indices"])
+        except RuntimeError:
+            # The LP/MILP solver can fail numerically; the other two methods
+            # still give a usable ranking.
+            logger.warning("Supported Diversity failed; skipping it.", exc_info=True)
+            diversity_indices = set()
 
-        # 5. Methods graph HTML
+        # Eigenvalue plot (generated when render_artifacts=True)
+        eig_path = ""
+        if render_artifacts and graph.n > 0:
+            base = os.path.join(output_dir, _generate_filename_from_prompt(prompt, ""))
+            try:
+                eig_path = _plot_laplacian_spectrum(graph, base)
+            except Exception:
+                logger.warning("Eigenvalue plot failed; skipping it.", exc_info=True)
+
+        # 3. Methods graph HTML
         methods_html = (
             self._render_methods_graph(
                 graph, prompt, initial_point_ids,
-                singular_indices, hinge_indices, theta_indices,
+                spectral_indices, bridge_indices, diversity_indices,
                 output_dir,
             )
             if render_artifacts else ""
         )
 
-        if self._owns_embedder:
-            self.embedder.release()
-
-        # 6. Consensus ranking
-        ranked_chunks = self._consensus_ranking(graph, singular_info, hinge_indices, theta_indices)
+        # 4. Consensus ranking
+        ranked_chunks = self._consensus_ranking(
+            graph, spectral_indices, bridge_indices, diversity_indices
+        )
         summary = self._format_summary(ranked_chunks)
 
-        # 7. Excel export
+        # 5. Excel export
         excel_path = (
-            self._export_excel(graph, singular_indices, hinge_indices, theta_indices, prompt, output_dir)
+            self._export_excel(
+                graph, spectral_indices, bridge_indices, diversity_indices, prompt, output_dir
+            )
             if render_artifacts else ""
         )
 
@@ -302,7 +435,7 @@ class GraphExplorer:
 
     def _render_methods_graph(
         self, graph: SimilarityGraph, prompt: str, initial_ids: set,
-        singular_indices: set, hinge_indices: list[int], theta_indices: list[int],
+        spectral_indices: set[int], bridge_indices: set[int], diversity_indices: set[int],
         output_dir: str,
     ) -> str:
         path = os.path.join(output_dir, _generate_filename_from_prompt(prompt, "_methods.html"))
@@ -314,7 +447,7 @@ class GraphExplorer:
                      font={"color": GRAPH_PROMPT_TEXT_COLOR, "size": 28},
                      widthConstraint={"minimum": 140}, heightConstraint={"minimum": 60})
 
-        relevant = singular_indices | set(hinge_indices) | set(theta_indices)
+        relevant = spectral_indices | bridge_indices | diversity_indices
         ordered_relevant = sorted(relevant)
 
         # Prune for visualization: keep top 3 neighbors per node, same idea as
@@ -338,14 +471,14 @@ class GraphExplorer:
 
         for idx in ordered_relevant:
             p = graph.id_to_point[graph.ordered_ids[idx]]
-            if idx in singular_indices: color = METHOD_COLORS["Singular"]
-            elif idx in hinge_indices:  color = METHOD_COLORS["Hinge"]
-            elif idx in theta_indices:  color = METHOD_COLORS["Theta"]
+            if idx in spectral_indices: color = METHOD_COLORS["spectral_attention"]
+            elif idx in bridge_indices: color = METHOD_COLORS["semantic_bridge"]
+            elif idx in diversity_indices: color = METHOD_COLORS["supported_diversity"]
             else: color = "#97c2fc"
             methods = []
-            if idx in singular_indices: methods.append("Singular")
-            if idx in hinge_indices: methods.append("Hinge")
-            if idx in theta_indices: methods.append("Theta")
+            if idx in spectral_indices: methods.append("spectral_attention")
+            if idx in bridge_indices: methods.append("semantic_bridge")
+            if idx in diversity_indices: methods.append("supported_diversity")
             # See _render_main_graph: pyvis titles render as HTML, so corpus
             # text must be escaped to avoid stored XSS.
             safe_filename = html.escape(str(p.payload.get("filename", "N/A")))
@@ -366,17 +499,16 @@ class GraphExplorer:
 
     def _consensus_ranking(
         self, graph: SimilarityGraph,
-        singular_info: dict, hinge_indices: list[int], theta_indices: list[int],
+        spectral_indices: set[int], bridge_indices: set[int], diversity_indices: set[int],
     ) -> list[dict]:
-        relevant = set(singular_info.keys()) | set(hinge_indices) | set(theta_indices)
+        relevant = spectral_indices | bridge_indices | diversity_indices
         out = []
         for idx in relevant:
             p = graph.id_to_point[graph.ordered_ids[idx]]
             methods_display = []
-            if idx in singular_info:
-                methods_display.append(f"Eigenvectors ({', '.join(singular_info[idx])})")
-            if idx in hinge_indices: methods_display.append("Hinge")
-            if idx in theta_indices: methods_display.append("Theta")
+            if idx in spectral_indices: methods_display.append("spectral_attention")
+            if idx in bridge_indices: methods_display.append("semantic_bridge")
+            if idx in diversity_indices: methods_display.append("supported_diversity")
             out.append({
                 "filename": p.payload.get("filename", "N/A"),
                 "text": p.payload.get("text", "N/A"),
@@ -385,7 +517,14 @@ class GraphExplorer:
                 "count": len(methods_display),
                 "themes": _extract_themes(p.payload.get("text", ""), self.nlp),
             })
-        out.sort(key=lambda c: c["count"], reverse=True)
+        out.sort(
+            key=lambda c: (
+                c["count"],
+                "semantic_bridge" in c["methods"],
+                "supported_diversity" in c["methods"],
+            ),
+            reverse=True,
+        )
         return out
 
     @staticmethod
@@ -403,7 +542,7 @@ class GraphExplorer:
     @staticmethod
     def _export_excel(
         graph: SimilarityGraph,
-        singular_indices: set, hinge_indices: list[int], theta_indices: list[int],
+        spectral_indices: set[int], bridge_indices: set[int], diversity_indices: set[int],
         prompt: str, output_dir: str,
     ) -> str:
         path = os.path.join(output_dir, _generate_filename_from_prompt(prompt, ".xlsx"))
@@ -411,9 +550,9 @@ class GraphExplorer:
         for idx, pid in enumerate(graph.ordered_ids):
             p = graph.id_to_point[pid]
             methods = []
-            if idx in singular_indices: methods.append("Singular")
-            if idx in hinge_indices: methods.append("Hinge")
-            if idx in theta_indices: methods.append("Theta")
+            if idx in spectral_indices: methods.append("spectral_attention")
+            if idx in bridge_indices: methods.append("semantic_bridge")
+            if idx in diversity_indices: methods.append("supported_diversity")
             sanitized = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", str(p.payload.get("text", "")))
             node_rows.append({
                 "Node ID": idx,

@@ -23,7 +23,7 @@ scipy
 scikit-learn
 wordcloud
 python-dotenv
-eigenmind==0.1.1
+eigenmind==0.2.0
 # OLAF's server.py uses the pre-2.0 low-level Server API (removed in mcp 2.0) — see pyproject.toml
 mcp<2.0.0
 olaf @ git+https://github.com/merlin-intelligence/olaf.git@f62c827b40fa95b27f2fc6b6bfae2445acda1ec2

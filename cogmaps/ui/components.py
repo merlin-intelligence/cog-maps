@@ -273,6 +273,17 @@ def render_sidebar() -> SidebarState:
     )
 
 
+_PROVIDER_LABELS = {
+    "scaleway": "Scaleway",
+    "ollama": "Ollama",
+}
+
+
+def provider_label(provider: str) -> str:
+    """Display name of an LLM provider id (e.g. ``"scaleway"`` → ``"Scaleway"``)."""
+    return _PROVIDER_LABELS.get(provider, provider.capitalize())
+
+
 def empty_state(icon: str, message: str) -> None:
     st.markdown(
         f'<div class="empty-state"><span class="icon">{icon}</span>{message}</div>',

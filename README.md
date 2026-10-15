@@ -17,10 +17,10 @@ CogMaps is a sophisticated knowledge management and exploration application buil
 
 2. **Knowledge Graph Navigation (`/navigate your experience/`)**
    - Generates interactive subgraphs of knowledge relationships based on specific prompts.
-   - Performs eigenvector/Laplacian analysis and identifies **Singular**, **Hinge**, and **Theta** nodes for unique, non-obvious insights.
+   - Selects chunks with three graph mechanisms from `eigenmind`: **Spectral Attention** (representative chunks of each theme), **Semantic Bridges** (closest links between otherwise disconnected themes) and **Supported Diversity** (a diverse, query-relevant set of well-connected chunks).
 
 3. **Advanced Question Answering (`/ask/`)**
-   - Hybrid Retrieval-Augmented Generation (RAG) using both standard semantic similarity and singular chunk analysis.
+   - Hybrid Retrieval-Augmented Generation (RAG) using both standard semantic similarity and the graph-selected chunks above.
    - **Scaleway** backend: Llama 3.3, Kimi 2.5, OpenAI OSS 120B via cloud API (requires `SCALEWAY_API_KEY`).
    - **Ollama** backend: any locally installed model (e.g. `qwen2.5:7b`), fully on-premise. Switch between backends from the sidebar toggle.
 
@@ -76,8 +76,8 @@ scripts/ingest_recursive.py CLI ingestion (also exposed as `cogmaps-ingest`)
 tests/unit/                 unit tests (app-level; pure graph-math tests live in the eigenmind package)
 ```
 
-The graph algorithms themselves (singular chunks, ℓ∞-connectivity/hinge ranking,
-Lovász θ diversity, `SimilarityGraph`) are published separately as the
+The graph algorithms themselves (spectral attention, semantic bridges,
+supported diversity, `SimilarityGraph`) are published separately as the
 [`eigenmind`](https://github.com/merlin-intelligence/eigenmind) package and
 pulled in as a regular dependency of `cogmaps/graph/` (see `pyproject.toml` / `requirements.txt`).
 

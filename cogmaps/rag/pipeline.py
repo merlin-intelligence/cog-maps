@@ -25,12 +25,13 @@ def answer_question(
     collection: str,
     prompt: str,
     num_similar: int,
-    num_singular: int,
+    num_graph: int,
 ) -> AnswerResult:
     """Retrieve context (similarity search + graph exploration) and generate an answer.
 
-    Blends plain cosine-similarity retrieval with the Graph Explorer's ranked "singular"
-    chunks (eigenvector/hinge/theta consensus), then asks ``llm_client`` to answer
+    Blends plain cosine-similarity retrieval with up to ``num_graph`` new chunks from
+    the Graph Explorer's consensus ranking (spectral attention / semantic bridges /
+    supported diversity), then asks ``llm_client`` to answer
     ``prompt`` citing chunk numbers. ``llm_client`` exposes ``chat(system_prompt, user_content)``
     (see :mod:`cogmaps.rag.llm_clients`).
     """
@@ -41,23 +42,40 @@ def answer_question(
         c["source_type"] = "Similarity Search"
     retrieved = list(sim_chunks)
 
-    # 2. Graph retrieval (singular/hinge/theta) — only ranked_chunks is used
-    # below, so skip the pyvis HTML/Excel rendering (render_artifacts=False)
-    # that the Graph Explorer page needs but a chat answer doesn't.
+    # 2. Graph retrieval (spectral_attention/semantic_bridge/supported_diversity)
+    # — only ranked_chunks is used below, so skip pyvis HTML/Excel rendering
+    # (render_artifacts=False) that the Graph Explorer page needs but a chat answer doesn't.
     with tempfile.TemporaryDirectory() as tmp_dir:
         explorer = GraphExplorer(nlp, store=store, embedder=embedder)
         artifacts = explorer.explore(collection, prompt, output_dir=tmp_dir, render_artifacts=False)
 
         added = 0
         for ch in artifacts.ranked_chunks:
-            if added >= num_singular:
-                break
-            if not any(c["text"] == ch["text"] for c in retrieved):
+            # A chunk already retrieved by similarity only gains its graph
+            # methods: it doesn't count towards num_graph, which is the number
+            # of *new* chunks the graph contributes (relabelling still happens
+            # with num_graph=0).
+            existing = next((c for c in retrieved if c["text"] == ch["text"]), None)
+            if existing is not None:
+                existing_methods = list(existing.get("methods") or [])
+                for m in ch.get("methods", []):
+                    if m not in existing_methods:
+                        existing_methods.append(m)
+                existing["methods"] = existing_methods
+                methods_str = ", ".join(existing_methods)
+                existing["source_type"] = (
+                    f"Similarity Search + Graph ({methods_str})"
+                    if methods_str
+                    else "Similarity Search + Graph"
+                )
+            elif added < num_graph:
+                methods_str = ", ".join(ch.get("methods", []))
                 retrieved.append({
                     "text": ch["text"],
                     "filename": ch["filename"],
                     "chunk_number": ch["chunk_id"],
-                    "source_type": f"Singular ({', '.join(ch['methods'])})",
+                    "methods": ch.get("methods", []),
+                    "source_type": f"Graph ({methods_str})" if methods_str else "Graph",
                     "score": None,
                 })
                 added += 1

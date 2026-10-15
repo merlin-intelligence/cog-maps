@@ -36,6 +36,12 @@ ENABLE_OCR = os.getenv("ENABLE_OCR", "false").lower() == "true"
 # ── Graph exploration ──
 MAX_CHUNKS = 100
 MAX_CHUNKS_FOR_CONTEXT = 30
+# eigenmind Supported Diversity: number of chunks picked, and the MILP time
+# limit in seconds. explore() runs on every Chat question, so the limit is kept
+# well below eigenmind's 10 s default; on timeout the solver still returns its
+# best feasible selection.
+DIVERSITY_BUDGET = 10
+DIVERSITY_TIME_LIMIT = 2.0
 NEIGHBORS_TO_FETCH = 5
 
 # ── Chat-page LLM backend ──
@@ -88,7 +94,7 @@ DEFAULT_OXIGRAPH_URL = "http://localhost:7878"
 GRAPH_BG_COLOR = "#faf6f0"
 GRAPH_TEXT_COLOR = "#2a1f18"
 GRAPH_EDGE_COLOR = "#8a6a50"
-# Distinct from every METHOD_COLORS hue (esp. Singular's amber-brown, which
+# Distinct from every METHOD_COLORS hue (esp. spectral_attention's amber-brown, which
 # GRAPH_EDGE_COLOR's brown would be confused with) so edges never read as
 # "another node" of one of the three method categories.
 GRAPH_METHODS_EDGE_COLOR = "#a82020"
@@ -101,11 +107,11 @@ DOCUMENT_COLORS = [
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
 ]
 # Drawn from the app's brand palette (cogmaps/ui/styles.py), matching the
-# Singular/Hinge/Theta badge hues (.badge-singular/.badge-hinge/.badge-theta).
+# spectral_attention/semantic_bridge/supported_diversity badge hues.
 METHOD_COLORS = {
-    "Singular": "#9a6010",
-    "Hinge":    "#2e6b3a",
-    "Theta":    "#4a7fa8",
+    "spectral_attention":  "#9a6010",
+    "semantic_bridge":     "#2e6b3a",
+    "supported_diversity": "#4a7fa8",
 }
 
 # ── Paths ──
