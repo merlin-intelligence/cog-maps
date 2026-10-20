@@ -119,14 +119,14 @@ class Ingester:
         with EmbeddingModel(device=self.device) as embedder:
             yield embedder
 
-    # ─── strategy 1: ChunkNorris (PDF/DOCX/TXT/MD) ─────────────────
+    # ─── strategy 1: ChunkNorris (PDF/DOCX/XLSX/CSV/PPTX/TXT/MD) ───
 
     def run_chunknorris(self, directories_file_path: str, collection: str) -> list[str]:
-        """Recursive ingestion of PDF/DOCX/TXT/MD using ChunkNorris. Returns log messages.
+        """Recursive ingestion of PDF/DOCX/XLSX/CSV/PPTX/TXT/MD using ChunkNorris. Returns log messages.
 
-        DOCX and TXT are converted to markdown so they go through the same
-        ChunkNorris pipeline as PDF and MD. PPTX/XLSX/CSV/JSON are skipped with a
-        "not supported yet" notice.
+        Every format is parsed to markdown then chunked by the same ChunkNorris
+        pipeline (PPTX via MarkItDown). JSON is skipped with a "not supported yet"
+        notice.
         """
         self.logs = []
         self.files_attempted = 0
