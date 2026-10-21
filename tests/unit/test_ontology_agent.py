@@ -387,3 +387,33 @@ def test_system_prompt_asks_for_disjointness():
     from cogmaps.ontology.prompts import SYSTEM_PROMPT
 
     assert "**Disjointness** via `disjoint_add`" in SYSTEM_PROMPT
+
+
+def test_run_build_retries_on_rate_limit_and_transient_errors(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(agent_mod.time, "sleep", sleeps.append)
+
+    attempts = iter([
+        litellm.RateLimitError("429 quota", "scaleway", "m"),
+        litellm.RateLimitError("429 quota", "scaleway", "m"),
+        litellm.Timeout("timeout", "m", "scaleway"),
+        _text_response("Done."),
+    ])
+
+    def fake_completion(**_kwargs):
+        item = next(attempts)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    session = _FakeSession({"chunk_list": "[]"})
+
+    _, logs = _run(session)
+
+    assert sleeps == [15, 30, 10]
+    assert any("Rate limited by the LLM provider — retrying in 15s (1/6)." in line for line in logs)
+    assert any("Rate limited by the LLM provider — retrying in 30s (2/6)." in line for line in logs)
+    assert any("LLM call failed (Timeout) — retrying in 10s (1/2)." in line for line in logs)
+    assert any("no pending chunks remain" in line for line in logs)
+

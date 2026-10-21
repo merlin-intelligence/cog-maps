@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import litellm
 from mcp import ClientSession
 
 from cogmaps.core.llm_impacts import tracked_completion
@@ -29,6 +31,39 @@ if TYPE_CHECKING:
     from cogmaps.ontology.domain_discovery import DomainBlueprint
 
 MAX_ITERATIONS = 150
+RATE_LIMIT_RETRIES = 6
+TRANSIENT_RETRIES = 2
+
+# Errors worth retrying as-is: the provider was slow or briefly unavailable.
+_TRANSIENT_ERRORS = (
+    litellm.Timeout,
+    litellm.APIConnectionError,
+    litellm.InternalServerError,
+    litellm.ServiceUnavailableError,
+)
+
+
+def _completion(log: Callable[[str], None], **kwargs):
+    """``tracked_completion``, retried on rate limits (HTTP 429) with a growing wait — quotas
+    are usually per minute, so the wait goes up to a full minute — and on transient errors
+    (timeout, connection, 5xx), retried a few times after a short pause."""
+    rate_limited = transient = 0
+    while True:
+        try:
+            return tracked_completion(**kwargs)
+        except litellm.RateLimitError:
+            if rate_limited == RATE_LIMIT_RETRIES:
+                raise
+            wait = min(15 * 2 ** rate_limited, 60)
+            rate_limited += 1
+            log(f"Rate limited by the LLM provider — retrying in {wait}s ({rate_limited}/{RATE_LIMIT_RETRIES}).")
+            time.sleep(wait)
+        except _TRANSIENT_ERRORS as exc:
+            if transient == TRANSIENT_RETRIES:
+                raise
+            transient += 1
+            log(f"LLM call failed ({type(exc).__name__}) — retrying in 10s ({transient}/{TRANSIENT_RETRIES}).")
+            time.sleep(10)
 
 # OLAF tools hidden from the build agent, and refused if called anyway:
 # checking, inferring and deleting entities belong to the reasoning agent
@@ -186,7 +221,8 @@ async def run_build(
             log(f"Compacted {compacted} old tool result(s) to keep the context small.")
 
         response = await asyncio.to_thread(
-            tracked_completion,
+            _completion,
+            log,
             model=f"scaleway/{model}",
             api_key=api_key,
             messages=messages,
