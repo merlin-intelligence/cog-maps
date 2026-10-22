@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import litellm
 import pytest
 
+import cogmaps.core.llm_impacts as llm_impacts
 import cogmaps.ontology.search_agent as search_mod
 from cogmaps.ontology.search_agent import SearchConversation, SearchTrace, SearchTurn, ask
 
@@ -186,3 +188,52 @@ def test_cited_chunk_ids_are_deduplicated_in_order():
     a, b = _CHUNK_ID, "11111111-2222-3333-4444-555555555555"
     turn = SearchTurn("q", f"x [chunk {b}, doc d] y [chunk {a}, doc d] z [chunk {b}, doc d]", SearchTrace())
     assert turn.cited_chunk_ids == [b, a]
+
+
+def _no_waits(monkeypatch) -> list[float]:
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(llm_impacts, "_async_sleep", fake_sleep)
+    return sleeps
+
+
+def test_ask_retries_a_rate_limit_and_logs_from_the_calling_thread(monkeypatch):
+    sleeps = _no_waits(monkeypatch)
+    _script_completions(monkeypatch, [
+        litellm.RateLimitError("429 quota", "scaleway", "m"),
+        _text_response("answer"),
+    ])
+    logs: list[tuple[str, threading.Thread]] = []
+
+    turn = _ask(_FakeSession(), SearchConversation("demo"), "q?",
+                log=lambda m: logs.append((m, threading.current_thread())))
+
+    assert turn.answer == "answer"
+    assert sleeps == [15]
+    # On the page, log is Streamlit's status.write: it must not run in a worker thread.
+    assert logs == [("Rate limited by the LLM provider — retrying in 15s (1/2).", threading.current_thread())]
+
+
+def test_ask_gives_up_after_the_interactive_retry_budget(monkeypatch):
+    sleeps = _no_waits(monkeypatch)
+    _script_completions(monkeypatch, [litellm.RateLimitError("429 quota", "scaleway", "m")] * 3)
+    conversation = SearchConversation("demo")
+
+    with pytest.raises(litellm.RateLimitError):
+        _ask(_FakeSession(), conversation, "q?")
+
+    assert sleeps == [15, 15]
+    assert [m["role"] for m in conversation.messages] == ["system"]  # the failed turn is dropped
+
+
+def test_ask_does_not_retry_a_timeout(monkeypatch):
+    _no_waits(monkeypatch)
+    sent = _script_completions(monkeypatch, [litellm.Timeout("timeout", "m", "scaleway")])
+
+    with pytest.raises(litellm.Timeout):
+        _ask(_FakeSession(), SearchConversation("demo"), "q?")
+
+    assert len(sent) == 1

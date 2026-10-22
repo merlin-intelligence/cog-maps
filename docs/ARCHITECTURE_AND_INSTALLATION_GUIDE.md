@@ -298,24 +298,41 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   where it stopped** — processed chunks are skipped. The 150-iteration cap
   (`MAX_ITERATIONS`) still applies.
 - **Provider rate limits** — Scaleway's quotas are per minute (requests and
-  tokens), and a long build hits them. Every LLM request of the ontology
-  agents (build, reasoning, search, domain discovery) goes through
-  `cogmaps.core.llm_retry.retrying_completion`: on HTTP 429 it waits 15, 30,
-  then 60 s (or the provider's `Retry-After`), up to 6 times (~5 minutes),
-  logging the provider's message (which quota was hit); timeouts, connection
-  errors and 5xx are retried twice after 10 s. Only then does the job fail —
-  re-launching it resumes where it stopped.
-- **Context compaction** — to keep long builds within the model's context,
-  tool results older than the 12 most recent are cut down to a short preview
-  once they exceed 1,500 characters (chunk texts and bulk listings are the
-  main culprits). The agent can call the tool again if it needs the full
-  result. Tunables live at the top of `cogmaps/ontology/agent.py`.
-- **Hidden tools** — the build agent doesn't see OLAF's `ontology_check`,
-  `ontology_infer` and `entity_delete` (checking, inferring and deleting are
-  the reasoning job's, below), `chunk_collection_switch` (the collection is
-  fixed by the job's `config.toml`) nor `seed_load` / `seed_select` (seeds
-  are loaded from the Ontology Explorer and selected on this page); calls to
-  them are refused (`HIDDEN_TOOLS` in `cogmaps/ontology/agent.py`).
+  tokens), and a long build hits them. LLM requests go through
+  `cogmaps.core.llm_impacts.completion_with_retry` (or
+  `acompletion_with_retry` in the async agents), which retries under a
+  `RetryPolicy`: `BACKGROUND_RETRY` for builds, reasoning runs and domain
+  discovery — on HTTP 429 it waits 15, 30, then 60 s (or the provider's
+  `Retry-After`), up to 6 times; a timeout is retried once with a doubled
+  timeout; connection errors and 5xx twice after 10 s — and
+  `INTERACTIVE_RETRY` (about half a minute) when someone waits on a page.
+  Only then does the job fail — re-launching it resumes where it stopped.
+- **Context size** — the whole conversation is sent with every LLM call, and
+  Scaleway's quota counts tokens per minute, so the build keeps it small:
+  - *one batch at a time* — when the agent reads a new batch of chunks
+    (`chunk_read_batch`), the previous batch's messages are dropped and
+    replaced by a short progress note; what was extracted is in the ontology,
+    found again with `concept_search`. The setup turns (state, seeds) stay, with
+    their large results cut down to a short preview.
+  - *compaction* — before the first batch, tool results older than the 12 most
+    recent are cut down to a preview once they exceed 1,500 characters.
+  - *a cap on tool results* — 40,000 characters (an export with the seeds once
+    overflowed the model's context). Exports are persisted whole; only what the
+    LLM reads is cut.
+  - *grouped tool calls* — the prompt asks for all independent calls (searches,
+    creations, relations, `chunk_mark_processed`) in one response, so a batch
+    takes a few round trips instead of one per call.
+
+  Tunables live at the top of `cogmaps/ontology/agent.py`.
+- **Tools** — the build agent only sees the OLAF tools its workflow uses
+  (`BUILD_TOOLS` in `cogmaps/ontology/agent.py`), since their schemas are sent
+  with every call too; calls to any other tool are refused. In particular,
+  `ontology_check`, `ontology_infer` and `entity_delete` belong to the reasoning
+  job (below), `chunk_collection_switch` is left out because the collection
+  is fixed by the job's `config.toml`, and `seed_load` / `seed_select` because
+  seeds are loaded from the Ontology Explorer and selected on this page.
+  `seed_reuse`, `seed_term_get` and `property_semantic_search`
+  (`SEED_TOOLS`) are added only when seeds are selected for the build.
 - **Seed ontologies** — the **seed ontologies to reuse** field selects, among
   the seeds loaded in Oxigraph, those the agent may reuse terms from (default:
   the seeds of the collection's last build; stored in the job's
@@ -329,11 +346,11 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   `include_seeds=true`; the system prompt gets OLAF's seed reuse rules
   (same meaning → `seed_reuse` and the seed URI, narrower → a local subclass
   of it, `seed_term_get` and the is-a test before linking, named entities as
-  individuals of seed classes); and the first user message lists the seeds'
-  general classes (those with at least 2 subclasses — candidate parents).
-  Without any seed, `seed_reuse` and `seed_term_get` are hidden too and the
-  prompt has no seed rules. The reasoning job reuses the seeds of the last
-  build.
+  individuals of seed classes) instead of exporting the seeds in full; and
+  the first user message — part of the setup, kept across batches — lists
+  the seeds' general classes (those with at least 2 subclasses — candidate
+  parents). Without any seed, the prompt has no seed rules. The reasoning job
+  reuses the seeds of the last build.
 - **Export** — intermediate `ontology_export` calls only overwrite the cached
   `.ttl` when they exclude seeds and actually declare at least one class,
   property or individual (checked by parsing the Turtle with `rdflib`). At the

@@ -16,7 +16,7 @@ import re
 from openai import APIConnectionError, APIError
 
 from cogmaps.config import chat_max_tokens
-from cogmaps.core.llm_impacts import tracked_completion
+from cogmaps.core.llm_impacts import INTERACTIVE_RETRY, completion_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def _chat_completion(
         kwargs["temperature"] = temperature
 
     try:
-        response = tracked_completion(**kwargs)
+        response = completion_with_retry(retry=INTERACTIVE_RETRY, **kwargs)
     except APIConnectionError as e:
         logger.error("Cannot reach %s: %s", vendor, e)
         raise RuntimeError(f"Cannot reach {vendor}: {e}") from e

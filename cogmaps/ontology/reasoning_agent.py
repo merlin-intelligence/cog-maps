@@ -36,7 +36,6 @@ The code drives the work; the LLM only decides and applies the changes:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from collections.abc import Callable
@@ -44,7 +43,7 @@ from dataclasses import dataclass, field
 
 from mcp import ClientSession
 
-from cogmaps.core.llm_retry import retrying_completion
+from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
 from cogmaps.ontology.agent import mcp_tools_to_litellm, select_seeds
 from cogmaps.ontology.olaf_config import has_ontology_content
 from cogmaps.ontology.reasoning_prompts import (
@@ -89,6 +88,7 @@ _META_TYPES = (
     "http://www.w3.org/2002/07/owl#ObjectProperty", "http://www.w3.org/2002/07/owl#DatatypeProperty",
     "http://www.w3.org/2002/07/owl#Thing",
 )
+
 
 def prune_history(messages: list[dict], keep_recent_turns: int, pruned_chars: int) -> list[dict]:
     """Copy of ``messages`` to send to the LLM: tool results older than the last
@@ -279,9 +279,9 @@ class ReasoningAgent:
         ]
         for iteration in range(1, MAX_ITERATIONS + 1):
             self.log(f"[{label}] iteration {iteration}")
-            response = await asyncio.to_thread(
-                retrying_completion,
-                self.log,
+            response = await acompletion_with_retry(
+                retry=BACKGROUND_RETRY,
+                log=self.log,
                 model=f"scaleway/{self.model}",
                 api_key=self.api_key,
                 messages=prune_history(messages, KEEP_RECENT_TURNS, PRUNED_RESULT_CHARS),

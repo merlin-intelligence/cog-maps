@@ -24,7 +24,7 @@ from cogmaps.config import (
     domain_profiles_dir,
     scaleway_api_key,
 )
-from cogmaps.core.llm_retry import retrying_completion
+from cogmaps.core.llm_impacts import BACKGROUND_RETRY, completion_with_retry
 from cogmaps.ontology.olaf_config import sanitize_ontology_id
 from cogmaps.qdrant.store import QdrantStore
 
@@ -291,8 +291,9 @@ def synthesize_domain_blueprint(
 
     logger.info("Running domain discovery with model=%s on collection=%s", target_model, collection)
     try:
-        response = retrying_completion(
-            logger.warning,
+        # Runs right before a build, on the same Scaleway quota — as patient as the build.
+        response = completion_with_retry(
+            retry=BACKGROUND_RETRY,
             model=f"scaleway/{target_model}",
             api_key=target_key,
             messages=[

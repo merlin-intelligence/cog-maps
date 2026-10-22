@@ -236,7 +236,7 @@ def test_prompt_keeps_original_olaf_rules():
     prompt = build_system_prompt(None)
     for rule in (
         "Pick one relation per pair",
-        "Call `property_search` and/or `property_semantic_search` before every `property_create`",
+        "Call `property_search` before every `property_create`",
         "Never type a URI from memory in `relation_add`",
         "Labels must be space-separated words in title case",
         "Call `ontology_orphans`",

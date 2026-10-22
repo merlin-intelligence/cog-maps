@@ -18,7 +18,15 @@ BASE_WORKFLOW_TEMPLATE = """You are an expert ontology engineer agent. Your task
 ## Target Density & Coverage
 Your goal is an in-depth, high-density domain model. Do NOT stop after creating only high-level categories—actively extract the specific subclasses, processes, roles, mechanisms, and real-world named entities found in the text that give the knowledge model analytical depth.
 
-{domain_section}{seed_section}## Workflow — follow this order
+{domain_section}{seed_section}## Group your tool calls
+One response can hold several tool calls; they run in order. Every response costs a full round trip with the whole conversation, so put all the calls that don't depend on each other in the same response:
+- all the `concept_search`/`property_search` checks for a batch of chunks together,
+- then all the `concept_create`, `individual_create` and `property_create` calls together,
+- then all the `relation_add` and `disjoint_add` calls that use the URIs just returned,
+- then one `chunk_mark_processed` per chunk of the batch, all in one response.
+Split calls across responses only when a call needs a result (e.g. a URI) from another one.
+
+## Workflow — follow this order
 
 1. **Discover the state**
    - Call `ontology_list` to see existing ontologies.
@@ -34,6 +42,7 @@ Your goal is an in-depth, high-density domain model. Do NOT stop after creating 
    - Read batches of 5 to 10 chunks at a time using `chunk_read_batch(chunk_ids=[...])`.
    - From each batch of chunks, extract what is relevant: concepts (`concept_create`), relationships (`property_create` and `relation_add`), individuals (`individual_create`), and disjointness between classes (`disjoint_add`). Chunks with no domain content (bibliography, table of contents, boilerplate) need not produce anything.
    - Call `chunk_mark_processed` for chunks after extracting from them.
+   - Finish a batch — create, relate, mark processed — before reading the next one: reading a new batch removes the previous batch's conversation from your context (what you created stays in the ontology, findable with `concept_search`).
    - Move through ALL pending chunks of ALL requested documents. Do NOT stop after only 1 or 2 documents!
    - Repeat until `chunk_list(status="pending")` returns an empty list for every requested document.
 
@@ -58,7 +67,7 @@ Your goal is an in-depth, high-density domain model. Do NOT stop after creating 
 6. **Before creating anything — always deduplicate**
    - Call `concept_search` (label substring match) or/and `concept_semantic_search` (vector similarity)
      before every `concept_create`. If a match exists, reuse or extend it instead.
-   - Call `property_search` and/or `property_semantic_search` before every `property_create`.
+   - Call `property_search` before every `property_create`.
    - Never type a URI from memory in `relation_add`. Always copy the exact `uri` returned by
      `concept_create`/`individual_create`/`property_create`, or found via `concept_search`/
      `concept_get`/`property_search`. `relation_add` will reject guessed URIs that don't
