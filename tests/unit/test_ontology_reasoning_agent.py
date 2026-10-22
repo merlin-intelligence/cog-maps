@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import litellm
 
+import cogmaps.core.llm_impacts as llm_impacts
 from cogmaps.ontology.reasoning_agent import FIX_TOOLS, prune_history, report_counts, run_reasoning
 
 _TTL = "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n<http://olaf.local/ontology#Car> a owl:Class ."
@@ -396,3 +397,26 @@ def test_prune_history_keeps_recent_turns_and_task_message():
     assert pruned[3]["content"].startswith("x" * 10 + "\n… [pruned")
     assert pruned[-1]["content"] == long                # last turn kept whole
     assert messages[3]["content"] == long               # original not mutated
+
+
+def test_llm_rate_limit_is_retried(monkeypatch):
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(llm_impacts, "_async_sleep", fake_sleep)
+    attempts = iter([litellm.RateLimitError("429 quota", "scaleway", "m"), _text_response("Left as is.")])
+
+    def fake_completion(**_kwargs):
+        item = next(attempts)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+
+    _, out = _run(_FakeSession([(_CLEAN, [_ORPHAN])]), **_REPAIR_ONLY)
+
+    assert sleeps == [15]
+    assert "Rate limited by the LLM provider — retrying in 15s (1/6)." in out["logs"]

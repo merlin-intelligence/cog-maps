@@ -291,17 +291,29 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   lists the documents with pending chunks. **Re-launching the build resumes
   where it stopped** — processed chunks are skipped. The 150-iteration cap
   (`MAX_ITERATIONS`) still applies.
-- **Context compaction** — to keep long builds within the model's context,
-  tool results older than the 12 most recent are cut down to a short preview
-  once they exceed 1,500 characters (chunk texts and bulk listings are the
-  main culprits). The agent can call the tool again if it needs the full
-  result. Tunables live at the top of `cogmaps/ontology/agent.py`.
-- **Hidden tools** — the build agent doesn't see OLAF's `ontology_check`,
-  `ontology_infer` and `entity_delete` (checking, inferring and deleting are
-  the reasoning job's, below) nor
-  `chunk_collection_switch` (the collection is fixed by the job's
-  `config.toml`); calls to them are refused (`HIDDEN_TOOLS` in
-  `cogmaps/ontology/agent.py`).
+- **Context size** — the whole conversation is sent with every LLM call, and
+  Scaleway's quota counts tokens per minute, so the build keeps it small:
+  - *one batch at a time* — when the agent reads a new batch of chunks
+    (`chunk_read_batch`), the previous batch's messages are dropped and
+    replaced by a short progress note; what was extracted is in the ontology,
+    found again with `concept_search`. The setup turns (state, seeds) stay, with
+    their large results cut down to a short preview.
+  - *compaction* — before the first batch, tool results older than the 12 most
+    recent are cut down to a preview once they exceed 1,500 characters.
+  - *a cap on tool results* — 40,000 characters (an export with the seeds once
+    overflowed the model's context). Exports are persisted whole; only what the
+    LLM reads is cut.
+  - *grouped tool calls* — the prompt asks for all independent calls (searches,
+    creations, relations, `chunk_mark_processed`) in one response, so a batch
+    takes a few round trips instead of one per call.
+
+  Tunables live at the top of `cogmaps/ontology/agent.py`.
+- **Tools** — the build agent only sees the OLAF tools its workflow uses
+  (`BUILD_TOOLS` in `cogmaps/ontology/agent.py`), since their schemas are sent
+  with every call too; calls to any other tool are refused. In particular,
+  `ontology_check`, `ontology_infer` and `entity_delete` belong to the reasoning
+  job (below), and `chunk_collection_switch` is left out because the collection
+  is fixed by the job's `config.toml`.
 - **Export** — intermediate `ontology_export` calls only overwrite the cached
   `.ttl` when they exclude seeds and actually declare at least one class,
   property or individual (checked by parsing the Turtle with `rdflib`). At the
