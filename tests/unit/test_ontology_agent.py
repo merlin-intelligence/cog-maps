@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import litellm
 
+import cogmaps.core.llm_impacts as llm_impacts
 import cogmaps.ontology.agent as agent_mod
 import cogmaps.ontology.runner as runner_mod
 from cogmaps.ontology.agent import run_build
@@ -220,7 +221,85 @@ def test_run_build_stops_at_max_iterations_even_if_chunks_are_pending(monkeypatc
     assert any("Re-launch the build to continue" in line for line in logs)
 
 
-# ── _compact_history ─────────────────────────────────────────────────
+def test_run_build_sends_and_runs_only_the_build_tools(monkeypatch):
+    sent_tools: list[list[str]] = []
+    it = iter([_tool_response("sparql_query", {"query": "SELECT * {}"}), _text_response("Done.")])
+
+    def fake_completion(**kwargs):
+        sent_tools.append([t["function"]["name"] for t in kwargs["tools"]])
+        return next(it)
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+
+    class _Session(_FakeSession):
+        async def list_tools(self):
+            names = ["concept_create", "chunk_read_batch", "sparql_query", "ontology_check", "restriction_add"]
+            return SimpleNamespace(tools=[
+                SimpleNamespace(name=n, description="", inputSchema={"type": "object"}) for n in names
+            ])
+
+    session = _Session({"chunk_list": "[]"})
+    _run(session)
+
+    assert sent_tools[0] == ["concept_create", "chunk_read_batch"]
+    # A tool outside the list is refused, not run.
+    assert ("sparql_query", {"query": "SELECT * {}"}) not in session.calls
+
+
+def test_run_build_truncates_long_results_but_persists_the_whole_export(monkeypatch):
+    big_ttl = _TTL + "\n" + "# padding\n" * agent_mod.MAX_TOOL_RESULT_CHARS
+    sent = _script_completions(monkeypatch, [_tool_response("ontology_export"), _text_response("Done.")])
+    session = _FakeSession({"chunk_list": "[]", "ontology_export": big_ttl})
+
+    exported, _ = _run(session)
+
+    assert exported == [big_ttl]
+    tool_msg = sent[1][-1]
+    assert tool_msg["role"] == "tool"
+    assert len(tool_msg["content"]) < agent_mod.MAX_TOOL_RESULT_CHARS + 200
+    assert "truncated" in tool_msg["content"]
+
+
+def test_run_build_drops_the_previous_batch_when_reading_the_next(monkeypatch):
+    chunks = _PendingChunks(["c1", "c2"])
+    sent = _script_completions(monkeypatch, [
+        _tool_response("seed_list", call_id="setup"),
+        _tool_response("chunk_read_batch", {"chunk_ids": ["c1"]}, call_id="read-1"),
+        _tool_response("chunk_mark_processed", {"chunk_id": "c1"}, call_id="mark-1"),
+        _tool_response("chunk_read_batch", {"chunk_ids": ["c2"]}, call_id="read-2"),
+        _tool_response("chunk_mark_processed", {"chunk_id": "c2"}, call_id="mark-2"),
+        _text_response("Done."),
+    ])
+    session = _FakeSession({
+        "seed_list": "[]",
+        "chunk_read_batch": lambda args: "chunk text " * 500,
+        "chunk_list": chunks.chunk_list,
+        "chunk_mark_processed": chunks.chunk_mark_processed,
+    })
+
+    _, logs = _run(session)
+
+    # The call after the second batch was read: setup kept, first batch gone.
+    after_reset = sent[4]
+    ids = [m.get("tool_call_id") for m in after_reset if m["role"] == "tool"]
+    assert ids == ["setup", "read-2"]
+    note = after_reset[4]
+    assert note["role"] == "user"
+    assert "1 batch(es) of chunks done so far, 1 chunk(s) marked processed" in note["content"]
+    # The batch being worked on is never compacted.
+    assert agent_mod._COMPACTED_MARKER not in after_reset[-1]["content"]
+    assert any("dropped the previous batch's 4 message(s)" in line for line in logs)
+    assert any("no pending chunks remain" in line for line in logs)
+
+
+def test_build_prompt_asks_to_group_tool_calls():
+    from cogmaps.ontology.prompts import SYSTEM_PROMPT
+
+    assert "## Group your tool calls" in SYSTEM_PROMPT
+    assert SYSTEM_PROMPT.index("## Group your tool calls") < SYSTEM_PROMPT.index("## Workflow")
+
+
+# ── compact_history ─────────────────────────────────────────────────
 
 def _history(n_tools: int, size: int) -> list[dict]:
     msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
@@ -234,7 +313,7 @@ def test_compact_history_truncates_only_old_large_tool_results():
     keep = agent_mod.KEEP_RECENT_TOOL_RESULTS
     msgs = _history(keep + 3, agent_mod.COMPACT_THRESHOLD_CHARS + 1)
 
-    assert agent_mod._compact_history(msgs) == 3
+    assert agent_mod.compact_history(msgs) == 3
 
     tools = [m for m in msgs if m["role"] == "tool"]
     assert all(agent_mod._COMPACTED_MARKER in m["content"] for m in tools[:3])
@@ -247,11 +326,21 @@ def test_compact_history_truncates_only_old_large_tool_results():
 def test_compact_history_keeps_small_results_and_is_idempotent():
     keep = agent_mod.KEEP_RECENT_TOOL_RESULTS
     msgs = _history(keep + 2, 200)  # e.g. concept_create URIs
-    assert agent_mod._compact_history(msgs) == 0
+    assert agent_mod.compact_history(msgs) == 0
 
     big = _history(keep + 1, agent_mod.COMPACT_THRESHOLD_CHARS * 2)
-    assert agent_mod._compact_history(big) == 1
-    assert agent_mod._compact_history(big) == 0
+    assert agent_mod.compact_history(big) == 1
+    assert agent_mod.compact_history(big) == 0
+
+
+def test_compact_history_keep_from_compacts_everything_before_the_batch():
+    msgs = _history(4, agent_mod.COMPACT_THRESHOLD_CHARS + 1)
+    batch_start = 6  # the third assistant turn
+
+    assert agent_mod.compact_history(msgs, keep_from=batch_start) == 2
+
+    tools = [m for m in msgs if m["role"] == "tool"]
+    assert [agent_mod._COMPACTED_MARKER in m["content"] for m in tools] == [True, True, False, False]
 
 
 # ── final_export ─────────────────────────────────────────────────────
@@ -391,7 +480,11 @@ def test_system_prompt_asks_for_disjointness():
 
 def test_run_build_retries_on_rate_limit_and_transient_errors(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr(agent_mod.time, "sleep", sleeps.append)
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(llm_impacts, "_async_sleep", fake_sleep)
 
     attempts = iter([
         litellm.RateLimitError("429 quota", "scaleway", "m"),
@@ -399,8 +492,10 @@ def test_run_build_retries_on_rate_limit_and_transient_errors(monkeypatch):
         litellm.Timeout("timeout", "m", "scaleway"),
         _text_response("Done."),
     ])
+    timeouts: list[float] = []
 
-    def fake_completion(**_kwargs):
+    def fake_completion(**kwargs):
+        timeouts.append(kwargs["timeout"])
         item = next(attempts)
         if isinstance(item, Exception):
             raise item
@@ -411,9 +506,9 @@ def test_run_build_retries_on_rate_limit_and_transient_errors(monkeypatch):
 
     _, logs = _run(session)
 
-    assert sleeps == [15, 30, 10]
+    assert sleeps == [15, 30]
+    assert timeouts == [120, 120, 120, 240]
     assert any("Rate limited by the LLM provider — retrying in 15s (1/6)." in line for line in logs)
     assert any("Rate limited by the LLM provider — retrying in 30s (2/6)." in line for line in logs)
-    assert any("LLM call failed (Timeout) — retrying in 10s (1/2)." in line for line in logs)
+    assert any("LLM call timed out — retrying with a 240s timeout (1/1)." in line for line in logs)
     assert any("no pending chunks remain" in line for line in logs)
-

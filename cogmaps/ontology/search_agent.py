@@ -14,7 +14,6 @@ adapted to:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -27,7 +26,8 @@ from typing import Any
 from mcp import ClientSession
 
 from cogmaps.config import oxigraph_url, qdrant_api_key
-from cogmaps.ontology.agent import _compact_history, _completion, _summarise, mcp_tools_to_litellm
+from cogmaps.core.llm_impacts import INTERACTIVE_RETRY, acompletion_with_retry
+from cogmaps.ontology.agent import compact_history, mcp_tools_to_litellm, summarise_args
 from cogmaps.ontology.mcp_client import olaf_session
 from cogmaps.ontology.olaf_config import build_config_toml
 from cogmaps.ontology.search_prompts import WRAP_UP_PROMPT, build_system_prompt
@@ -193,9 +193,11 @@ async def _run_loop(
     max_iterations: int,
 ) -> str:
     async def complete(tool_choice: str):
-        return await asyncio.to_thread(
-            _completion,
-            log,
+        # Someone is waiting on the page: retry briefly, and from the event loop, so
+        # that ``log`` (Streamlit's status.write there) runs on the script thread.
+        return await acompletion_with_retry(
+            retry=INTERACTIVE_RETRY,
+            log=log,
             model=f"scaleway/{model}",
             api_key=api_key,
             messages=messages,
@@ -213,7 +215,7 @@ async def _run_loop(
 
     for _iteration in range(max_iterations):
         # Earlier questions' chunk texts and SPARQL rows stay in the history — shrink them.
-        _compact_history(messages)
+        compact_history(messages)
         msg = (await complete("auto")).choices[0].message
 
         if not msg.tool_calls:
@@ -260,7 +262,7 @@ async def _call_tool(
         log(f"Refused non read-only tool: {name}")
         return f"Error: tool '{name}' is not available — this agent has read-only access."
 
-    log(f"{name}({_summarise(args)})")
+    log(f"{name}({summarise_args(args)})")
     try:
         result = await session.call_tool(name, args)
         content = result.content[0].text if result.content else ""

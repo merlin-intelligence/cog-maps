@@ -4,10 +4,17 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import litellm
+import pytest
 
+import cogmaps.core.llm_impacts as llm_impacts
 from cogmaps.core.llm_impacts import (
+    BACKGROUND_RETRY,
+    INTERACTIVE_RETRY,
     LLMCallImpact,
+    acompletion_with_retry,
+    completion_with_retry,
     estimate_impacts,
     record_llm_impacts,
     tracked_completion,
@@ -81,3 +88,120 @@ def test_job_store_round_trips_llm_calls(tmp_path):
     store.append_llm_call("job-2", call.to_dict())
 
     assert [LLMCallImpact.from_dict(d) for d in store.get_llm_calls("job-1")] == [call]
+
+
+# ── Retries ──────────────────────────────────────────────────────────
+
+def _rate_limit(retry_after: str | None = None):
+    headers = {"retry-after": retry_after} if retry_after else {}
+    response = httpx.Response(429, headers=headers, request=httpx.Request("POST", "https://api.scaleway.ai"))
+    return litellm.RateLimitError("429 quota", "scaleway", "m", response=response)
+
+
+def _scripted(monkeypatch, outcomes: list) -> list[dict]:
+    """Patch litellm.completion to raise or return ``outcomes`` in order; returns the kwargs sent."""
+    sent: list[dict] = []
+    it = iter(outcomes)
+
+    def fake_completion(**kwargs):
+        sent.append(dict(kwargs))
+        item = next(it)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    return sent
+
+
+@pytest.fixture
+def sleeps(monkeypatch) -> list[float]:
+    waits: list[float] = []
+
+    async def fake_async_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(llm_impacts, "_sleep", waits.append)
+    monkeypatch.setattr(llm_impacts, "_async_sleep", fake_async_sleep)
+    return waits
+
+
+def test_retry_turns_off_the_sdk_retries(monkeypatch, sleeps):
+    sent = _scripted(monkeypatch, [_response()])
+    completion_with_retry(model="scaleway/glm-5.2", messages=[])
+    assert sent[0]["max_retries"] == 0
+
+
+def test_rate_limit_waits_what_the_provider_asks(monkeypatch, sleeps):
+    _scripted(monkeypatch, [_rate_limit("7"), _response()])
+    completion_with_retry(retry=BACKGROUND_RETRY, model="scaleway/glm-5.2", messages=[])
+    assert sleeps == [7]
+
+
+def test_rate_limit_gives_up_when_the_provider_asks_for_too_long(monkeypatch, sleeps):
+    sent = _scripted(monkeypatch, [_rate_limit("120")])
+    with pytest.raises(litellm.RateLimitError):
+        completion_with_retry(retry=INTERACTIVE_RETRY, model="scaleway/glm-5.2", messages=[])
+    assert len(sent) == 1 and sleeps == []
+
+
+def test_rate_limit_backs_off_then_raises_once_the_budget_is_spent(monkeypatch, sleeps):
+    sent = _scripted(monkeypatch, [_rate_limit()] * 7)
+    logs: list[str] = []
+    with pytest.raises(litellm.RateLimitError):
+        completion_with_retry(retry=BACKGROUND_RETRY, log=logs.append, model="scaleway/glm-5.2", messages=[])
+    assert len(sent) == 7
+    assert sleeps == [15, 30, 60, 60, 60, 60]
+    assert len(logs) == 6
+
+
+def test_timeout_is_retried_with_a_longer_timeout(monkeypatch, sleeps):
+    sent = _scripted(monkeypatch, [litellm.Timeout("timeout", "m", "scaleway")] * 2)
+    with pytest.raises(litellm.Timeout):
+        completion_with_retry(retry=BACKGROUND_RETRY, model="scaleway/glm-5.2", messages=[], timeout=90)
+    assert [kw["timeout"] for kw in sent] == [90, 180]
+    assert sleeps == []
+
+
+def test_connection_error_is_retried_after_a_pause(monkeypatch, sleeps):
+    _scripted(monkeypatch, [litellm.APIConnectionError("reset", "scaleway", "m"), _response()])
+    completion_with_retry(retry=INTERACTIVE_RETRY, model="scaleway/glm-5.2", messages=[])
+    assert sleeps == [10]
+
+
+def test_other_errors_are_not_retried(monkeypatch, sleeps):
+    sent = _scripted(monkeypatch, [litellm.BadRequestError("bad", "m", "scaleway")])
+    with pytest.raises(litellm.BadRequestError):
+        completion_with_retry(model="scaleway/glm-5.2", messages=[])
+    assert len(sent) == 1
+
+
+def test_async_retry_logs_and_waits_on_the_event_loop_thread(monkeypatch):
+    import threading
+
+    _scripted(monkeypatch, [_rate_limit("2"), _response()])
+    log_threads: list[threading.Thread] = []
+    sleep_threads: list[threading.Thread] = []
+
+    async def fake_async_sleep(_seconds):
+        sleep_threads.append(threading.current_thread())
+
+    monkeypatch.setattr(llm_impacts, "_async_sleep", fake_async_sleep)
+    asyncio.run(acompletion_with_retry(
+        log=lambda _m: log_threads.append(threading.current_thread()),
+        model="scaleway/glm-5.2", messages=[],
+    ))
+    assert log_threads == sleep_threads == [threading.current_thread()]
+
+
+def test_cancelling_the_task_cancels_a_pending_wait(monkeypatch):
+    _scripted(monkeypatch, [_rate_limit("60")])
+
+    async def main():
+        task = asyncio.create_task(acompletion_with_retry(model="scaleway/glm-5.2", messages=[]))
+        await asyncio.sleep(0.2)  # the request failed, the 60s wait has started
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(asyncio.wait_for(main(), timeout=5))

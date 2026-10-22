@@ -36,7 +36,6 @@ The code drives the work; the LLM only decides and applies the changes:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from collections.abc import Callable
@@ -44,12 +43,8 @@ from dataclasses import dataclass, field
 
 from mcp import ClientSession
 
-from cogmaps.ontology.agent import (
-    RATE_LIMIT_RETRIES,
-    TRANSIENT_RETRIES,
-    _completion,
-    mcp_tools_to_litellm,
-)
+from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
+from cogmaps.ontology.agent import mcp_tools_to_litellm
 from cogmaps.ontology.olaf_config import has_ontology_content
 from cogmaps.ontology.reasoning_prompts import (
     DEDUP_PROMPT,
@@ -281,9 +276,9 @@ class ReasoningAgent:
         ]
         for iteration in range(1, MAX_ITERATIONS + 1):
             self.log(f"[{label}] iteration {iteration}")
-            response = await asyncio.to_thread(
-                _completion,
-                self.log,
+            response = await acompletion_with_retry(
+                retry=BACKGROUND_RETRY,
+                log=self.log,
                 model=f"scaleway/{self.model}",
                 api_key=self.api_key,
                 messages=prune_history(messages, KEEP_RECENT_TURNS, PRUNED_RESULT_CHARS),
