@@ -25,13 +25,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mcp import ClientSession
+from qdrant_client import QdrantClient
 
 from cogmaps.config import oxigraph_url, qdrant_api_key
-from cogmaps.core.llm_impacts import tracked_completion
+from cogmaps.core.llm_retry import retrying_completion
 from cogmaps.ontology.agent import _compact_history, _summarise, mcp_tools_to_litellm
 from cogmaps.ontology.mcp_client import olaf_session
 from cogmaps.ontology.olaf_config import build_config_toml
 from cogmaps.ontology.search_prompts import WRAP_UP_PROMPT, build_system_prompt
+from cogmaps.ontology.seeds import ensure_ontology_index
 from cogmaps.rag.llm_clients import strip_reasoning
 
 MAX_ITERATIONS = 20
@@ -50,9 +52,11 @@ READ_ONLY_TOOLS = frozenset({
     "concept_semantic_search",
     "property_get",
     "property_search",
+    "property_semantic_search",
     "relation_search",
     "relation_sources",
     "seed_list",
+    "seed_term_get",
     "ontology_list",
     "ontology_summary",
     "ontology_export",
@@ -195,7 +199,8 @@ async def _run_loop(
 ) -> str:
     async def complete(tool_choice: str):
         return await asyncio.to_thread(
-            tracked_completion,
+            retrying_completion,
+            log,
             model=f"scaleway/{model}",
             api_key=api_key,
             messages=messages,
@@ -306,6 +311,9 @@ async def ask_collection(
                 ontology_id=conversation.ontology_id,
                 ontology_name=collection,
             ))
+        ensure_ontology_index(
+            conversation.ontology_id, config_dir, QdrantClient(url=qdrant_url, api_key=qdrant_api_key()), log,
+        )
         log("Starting OLAF…")
         async with olaf_session(config_dir) as session:
             return await ask(

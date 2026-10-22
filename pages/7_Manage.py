@@ -79,7 +79,7 @@ with st.expander("⚠ danger zone — delete entire collection"):
         # the collection it was built from.
         st.warning(
             "⚠ Deleting this collection will also permanently delete the ontology "
-            "built for it in Oxigraph (if any), including its concepts collection, "
+            "built for it in Oxigraph (if any), including its semantic index, "
             "cached Turtle export and domain blueprint. This does not go the other way: deleting an ontology "
             "never deletes the collection."
         )
@@ -122,7 +122,7 @@ with st.expander("⚠ danger zone — delete ontology only"):
         st.markdown(
             f'<p style="font-family:\'DM Mono\',monospace;font-size:0.78rem;color:#a82020">'
             f'This will permanently delete the ontology for <strong>{html.escape(collection_name)}</strong> '
-            f'(named graph <code>urn:olaf:{_ontology_id}</code>) from Oxigraph, its concepts collection, '
+            f'(named graph <code>urn:olaf:{_ontology_id}</code>) from Oxigraph, its semantic index, '
             f'the cached Turtle export and the domain blueprint. <strong>The Qdrant collection itself is never affected.</strong></p>',
             unsafe_allow_html=True,
         )
@@ -142,8 +142,9 @@ with st.expander("⚠ danger zone — delete ontology only"):
 with st.expander("🌱 danger zone — delete seed ontologies (global)"):
     st.caption(
         "Seeds are reference ontologies shared across every collection's ontology "
-        "in Oxigraph — not scoped to the collection selected above. Deleting one "
-        "affects every ontology that reuses it."
+        "in Oxigraph — not scoped to the collection selected above. Ontologies keep the "
+        "seed terms they reused (copied in), but later builds and reasoning runs no longer see the seed. "
+        "Load seeds from /explore ontology/."
     )
     if not is_admin():
         st.warning("Only admins can delete seed ontologies.")
@@ -156,7 +157,8 @@ with st.expander("🌱 danger zone — delete seed ontologies (global)"):
             st.markdown(
                 f'<p style="font-family:\'DM Mono\',monospace;font-size:0.78rem;color:#a82020">'
                 f'This will permanently delete seed <strong>{html.escape(seed_to_delete)}</strong> '
-                f'(named graph <code>urn:olaf:seed:{html.escape(seed_to_delete)}</code>) from Oxigraph.</p>',
+                f'(named graph <code>urn:olaf:seed:{html.escape(seed_to_delete)}</code>) from Oxigraph '
+                f'and its semantic index from Qdrant.</p>',
                 unsafe_allow_html=True,
             )
             if st.checkbox(

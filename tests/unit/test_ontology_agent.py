@@ -387,3 +387,112 @@ def test_system_prompt_asks_for_disjointness():
     from cogmaps.ontology.prompts import SYSTEM_PROMPT
 
     assert "**Disjointness** via `disjoint_add`" in SYSTEM_PROMPT
+
+
+# ── Seeds ────────────────────────────────────────────────────────────
+
+class _SeedSession(_FakeSession):
+    """A session whose store holds the seeds ``loaded`` and that offers the seed tools."""
+
+    def __init__(self, loaded: list[str], **kwargs):
+        chunks = _PendingChunks([])
+        super().__init__({
+            "chunk_list": chunks.chunk_list,
+            "seed_list": json.dumps([{"id": s, "graph_uri": f"urn:olaf:seed:{s}"} for s in loaded]),
+            "seed_select": lambda args: json.dumps({"selected": args["seed_ids"]}),
+            "sparql_query": json.dumps({"rows": [
+                {"p": "https://ex.org/fibo/LegalEntity", "g": "urn:olaf:seed:fibo", "label": "legal entity",
+                 "children": "4"},
+            ]}),
+            "concept_search": "[]",
+        }, **kwargs)
+
+    async def list_tools(self):
+        names = ["concept_search", "seed_reuse", "seed_term_get", "seed_load", "seed_select", "chunk_list"]
+        return SimpleNamespace(tools=[SimpleNamespace(name=n, description="", inputSchema={}) for n in names])
+
+
+def _offered_tools(monkeypatch, responses):
+    """Patch litellm.completion like _script_completions, also recording the tools offered."""
+    offered: list[set[str]] = []
+    sent: list[list[dict]] = []
+    it = iter(responses)
+
+    def fake_completion(**kwargs):
+        offered.append({t["function"]["name"] for t in kwargs["tools"]})
+        sent.append(list(kwargs["messages"]))
+        return next(it)
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    return offered, sent
+
+
+def test_run_build_selects_the_job_seeds_still_loaded(monkeypatch):
+    offered, sent = _offered_tools(monkeypatch, [_text_response("Done.")])
+    session = _SeedSession(["fibo", "other"])
+
+    _, logs = _run(session, seed_ids=["fibo", "gone"])
+
+    assert ("seed_select", {"seed_ids": ["fibo"]}) in session.calls
+    assert any("gone" in line for line in logs)
+    # Seed management is the page's; reusing is the agent's.
+    assert offered[0] == {"concept_search", "seed_reuse", "seed_term_get", "chunk_list"}
+    system, user = sent[0][0]["content"], sent[0][1]["content"]
+    assert "Reuse seed terms" in system
+    assert "Seeds selected for this build: fibo." in user
+    assert "legal entity <https://ex.org/fibo/LegalEntity> [seed fibo, 4 subclasses]" in user
+
+
+def test_run_build_forces_include_seeds_on_searches(monkeypatch):
+    _offered_tools(monkeypatch, [
+        _tool_response("concept_search", {"query": "bank", "include_seeds": False}),
+        _text_response("Done."),
+    ])
+    session = _SeedSession(["fibo"])
+
+    _run(session, seed_ids=["fibo"])
+
+    assert ("concept_search", {"query": "bank", "include_seeds": True}) in session.calls
+
+
+def test_run_build_without_seeds_selects_none_and_hides_seed_tools(monkeypatch):
+    offered, sent = _offered_tools(monkeypatch, [
+        _tool_response("concept_search", {"query": "bank"}),
+        _text_response("Done."),
+    ])
+    session = _SeedSession(["fibo"])
+
+    _run(session)
+
+    # Not calling seed_select would leave OLAF's default: every seed in the store.
+    assert ("seed_select", {"seed_ids": []}) in session.calls
+    assert ("concept_search", {"query": "bank"}) in session.calls
+    assert offered[0] == {"concept_search", "chunk_list"}
+    assert "Reuse seed terms" not in sent[0][0]["content"]
+    assert not any(name == "sparql_query" for name, _ in session.calls)
+
+
+def test_run_build_waits_out_a_rate_limit_instead_of_failing(monkeypatch):
+    import httpx
+
+    from cogmaps.core import llm_retry
+
+    monkeypatch.setattr(llm_retry.time, "sleep", lambda _s: None)
+    response = httpx.Response(429, request=httpx.Request("POST", "https://api.scaleway.ai"))
+    outcomes = iter([
+        litellm.RateLimitError("Quota exceeded", llm_provider="scaleway", model="m", response=response),
+        _text_response("Done."),
+    ])
+
+    def fake_completion(**kwargs):
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+
+    _, logs = _run(_FakeSession({"chunk_list": "[]"}))
+
+    assert any("Rate limited" in line for line in logs)
+    assert any("no pending chunks remain" in line for line in logs)

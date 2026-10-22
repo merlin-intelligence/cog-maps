@@ -39,15 +39,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-import litellm
 from mcp import ClientSession
 
-from cogmaps.core.llm_impacts import tracked_completion
-from cogmaps.ontology.agent import mcp_tools_to_litellm
+from cogmaps.core.llm_retry import retrying_completion
+from cogmaps.ontology.agent import mcp_tools_to_litellm, select_seeds
 from cogmaps.ontology.olaf_config import has_ontology_content
 from cogmaps.ontology.reasoning_prompts import (
     DEDUP_PROMPT,
@@ -81,8 +79,6 @@ MAX_ENTITIES = 25              # entities described per task
 MAX_TOOL_RESULT_CHARS = 20_000
 KEEP_RECENT_TURNS = 6          # the last N LLM turns keep their full tool results
 PRUNED_RESULT_CHARS = 500      # older tool results are cut to this preview
-RATE_LIMIT_RETRIES = 6
-TRANSIENT_RETRIES = 2
 
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDFS = "http://www.w3.org/2000/01/rdf-schema#"
@@ -93,38 +89,6 @@ _META_TYPES = (
     "http://www.w3.org/2002/07/owl#ObjectProperty", "http://www.w3.org/2002/07/owl#DatatypeProperty",
     "http://www.w3.org/2002/07/owl#Thing",
 )
-
-# Errors worth retrying as-is: the provider was slow or briefly unavailable.
-_TRANSIENT_ERRORS = (
-    litellm.Timeout,
-    litellm.APIConnectionError,
-    litellm.InternalServerError,
-    litellm.ServiceUnavailableError,
-)
-
-
-def _completion(log: Callable[[str], None], **kwargs):
-    """``tracked_completion``, retried on rate limits (HTTP 429) with a growing wait — quotas
-    are usually per minute, so the wait goes up to a full minute — and on transient errors
-    (timeout, connection, 5xx), retried a few times after a short pause."""
-    rate_limited = transient = 0
-    while True:
-        try:
-            return tracked_completion(**kwargs)
-        except litellm.RateLimitError:
-            if rate_limited == RATE_LIMIT_RETRIES:
-                raise
-            wait = min(15 * 2 ** rate_limited, 60)
-            rate_limited += 1
-            log(f"Rate limited by the LLM provider — retrying in {wait}s ({rate_limited}/{RATE_LIMIT_RETRIES}).")
-            time.sleep(wait)
-        except _TRANSIENT_ERRORS as exc:
-            if transient == TRANSIENT_RETRIES:
-                raise
-            transient += 1
-            log(f"LLM call failed ({type(exc).__name__}) — retrying in 10s ({transient}/{TRANSIENT_RETRIES}).")
-            time.sleep(10)
-
 
 def prune_history(messages: list[dict], keep_recent_turns: int, pruned_chars: int) -> list[dict]:
     """Copy of ``messages`` to send to the LLM: tool results older than the last
@@ -226,6 +190,7 @@ class ReasoningAgent:
         enrich_disjointness: bool = True,
         infer: bool = True,
         review_inferences: bool = True,
+        seed_ids: list[str] | None = None,
     ) -> None:
         self.session = session
         self.model = model
@@ -243,6 +208,8 @@ class ReasoningAgent:
         self.enrich_disjointness = enrich_disjointness
         self.infer = infer
         self.review_inferences = review_inferences
+        # The seeds the ontology was built with (seed_select): what include_seeds reasons over.
+        self.seed_ids = seed_ids or []
 
         # With an older OLAF, the tools it lacks are simply not offered.
         self.tools = mcp_tools_to_litellm([t for t in mcp_tools if t.name in FIX_TOOLS])
@@ -313,7 +280,7 @@ class ReasoningAgent:
         for iteration in range(1, MAX_ITERATIONS + 1):
             self.log(f"[{label}] iteration {iteration}")
             response = await asyncio.to_thread(
-                _completion,
+                retrying_completion,
                 self.log,
                 model=f"scaleway/{self.model}",
                 api_key=self.api_key,
@@ -844,6 +811,8 @@ class ReasoningAgent:
         def step(name: str) -> None:
             self.set_progress(steps.index(name) + 1, len(steps))
             self.log(f"=== Step {steps.index(name) + 1}/{len(steps)}: {name} ===")
+
+        await select_seeds(self.session, self.seed_ids, self.log)
 
         if self.dedup:
             step("dedup")

@@ -3,7 +3,8 @@
 The workflow is ported from OLAF's own reference agent
 (https://github.com/merlin-intelligence/olaf, ``demos/olaf_building_agent/prompts.py``).
 A domain-specific section is injected only when a domain discovery blueprint
-is used for the build; otherwise the prompt stays domain-neutral.
+is used for the build; otherwise the prompt stays domain-neutral. The seed
+reuse rules are injected only when seed ontologies are selected for the build.
 """
 from __future__ import annotations
 
@@ -17,18 +18,13 @@ BASE_WORKFLOW_TEMPLATE = """You are an expert ontology engineer agent. Your task
 ## Target Density & Coverage
 Your goal is an in-depth, high-density domain model. Do NOT stop after creating only high-level categories—actively extract the specific subclasses, processes, roles, mechanisms, and real-world named entities found in the text that give the knowledge model analytical depth.
 
-{domain_section}## Workflow — follow this order
+{domain_section}{seed_section}## Workflow — follow this order
 
 1. **Discover the state**
    - Call `ontology_list` to see existing ontologies.
    - Call `ontology_summary` to check how many chunks have already been processed.
-   - Call `seed_list` to check for reference ontologies.
 
-2. **Handle seeds (mandatory check)**
-   - If seeds exist, call `ontology_export` with `include_seeds=true` to read their content.
-   - Study the seed classes and properties carefully.
-   - When building the ontology, ALWAYS prefer reusing a seed URI over creating a new concept.
-   - Link new concepts to seed concepts via `rdfs:subClassOf` or `owl:equivalentClass`.
+{seed_step}
 
 3. **Survey existing ontology**
    - Call `concept_list` to see existing classes and avoid duplicate URIs.
@@ -62,7 +58,7 @@ Your goal is an in-depth, high-density domain model. Do NOT stop after creating 
 6. **Before creating anything — always deduplicate**
    - Call `concept_search` (label substring match) or/and `concept_semantic_search` (vector similarity)
      before every `concept_create`. If a match exists, reuse or extend it instead.
-   - Call `property_search` before every `property_create`.
+   - Call `property_search` and/or `property_semantic_search` before every `property_create`.
    - Never type a URI from memory in `relation_add`. Always copy the exact `uri` returned by
      `concept_create`/`individual_create`/`property_create`, or found via `concept_search`/
      `concept_get`/`property_search`. `relation_add` will reject guessed URIs that don't
@@ -84,8 +80,8 @@ Your goal is an in-depth, high-density domain model. Do NOT stop after creating 
 
 8. **Check for isolated entities**
    - Call `ontology_orphans` to list classes/individuals with no relation to the rest of the graph.
-   - For each one, either connect it (a `parent_uri`, a `property_create`+`relation_add`, or an
-     `owl:equivalentClass`/`rdfs:subClassOf` to a seed concept) or, if it genuinely has no
+   - For each one, either connect it (a `parent_uri` — a reused seed class when one is a correct
+     generalisation —, or a `property_create`+`relation_add`) or, if it genuinely has no
      relation in the source text, note it in your final report instead of leaving it unexplained.
 
 9. **Finish**
@@ -98,7 +94,66 @@ _DOMAIN_SECTION_TEMPLATE = """## Key Domain Dimensions to Extract
 
 """
 
-SYSTEM_PROMPT = BASE_WORKFLOW_TEMPLATE.format(domain_section="")
+_NO_SEEDS_STEP = """2. **Seeds** — no seed (reference) ontology is used for this build: model everything in the
+   ontology itself."""
+
+_SEEDS_STEP = """2. **Seeds (reference ontologies)**
+   - The user message lists the seeds selected for this build and their general classes.
+   - Your searches (`concept_search`, `concept_semantic_search`, `property_search`,
+     `property_semantic_search`) always cover these seeds too: results with a non-null `seed`
+     field come from a seed. Never export the seeds to read them — search them, and read a seed
+     term with `seed_term_get`.
+   - Follow the "Reuse seed terms" rules above for every concept and property you need."""
+
+# Ported from OLAF's demos/olaf_building_agent/prompts.py ("Reuse seed terms").
+_SEED_SECTION = """## Reuse seed terms — never duplicate them
+Seeds are reference ontologies. Reusing their terms under their own URI is what makes the
+ontology interoperable. For each concept or property you need, compare it with the seed terms
+your searches return:
+- **Same meaning** as a seed term → call `seed_reuse(uri, source_chunk_id)`, then use the seed
+  URI everywhere (`parent_uri`, `class_uri`, `domain_uri`/`range_uri`, `relation_add`).
+  Do not create a local class or property for it, and do not link a local copy with
+  `owl:equivalentClass`.
+- **Narrower meaning** → `seed_reuse` the seed term, then `concept_create` a local class with
+  the seed URI as `parent_uri` (or `property_create` with it as `parent_uri`).
+- **Before every `concept_create`, ask what kind of thing it is** — an organisation, a legal
+  entity, a state, a government body, a loan, a policy, an intervention… — and look for that
+  kind among the general seed classes of the user message, or search for it (e.g.
+  `concept_semantic_search("sovereign state")`, not only the new class's own name). If a seed
+  class is a correct generalisation, `seed_reuse` it and pass it as `parent_uri`: e.g. "Small
+  Island Developing State" ⊂ seed "sovereign state", "Accredited Entity" ⊂ seed "legal entity".
+  Pick the most specific seed class that is still true of every instance.
+- **Check a seed term before reusing it**: call `seed_term_get(uri)` to read its definition,
+  parents and subclasses — a label is not enough. Then apply the **is-a test**: is *every*
+  instance of your class, by definition, an instance of the seed class? If not, or if you cannot
+  tell (no definition, unclear context), do not link them. Counter-examples: a project
+  beneficiary is not a "trust beneficiary" (a party to a trust); a climate risk is not a
+  "climate hazard" (the risk results from the hazard).
+- **A specific, named organisation, state or programme is an individual, not a class**:
+  `individual_create(label="Barbados Water Authority", class_uri=<seed "government body">)`,
+  not a subclass of it.
+- **Only related** (overlapping, not the same, not narrower) → create a local term; do not
+  assert equivalence or subsumption that the meanings do not support.
+- A reused term keeps its source definition: never call `concept_update`/`property_update` on
+  it, nor `relation_add` with it as subject — state the relation from the local entity.
+- If you already created a local duplicate of a seed term, `seed_reuse` the seed term and
+  `concept_merge(keep_uri=<seed URI>, merge_uri=<local URI>)`.
+- Using a seed URI that was not reused yet fails with an error telling you to call `seed_reuse`.
+- Semantic search scores are only comparable to each other — even unrelated entries can score
+  high. Judge a match by its label and definition (domain and range for a property).
+
+"""
+
+
+def _format_prompt(domain_section: str, use_seeds: bool) -> str:
+    return BASE_WORKFLOW_TEMPLATE.format(
+        domain_section=domain_section,
+        seed_section=_SEED_SECTION if use_seeds else "",
+        seed_step=_SEEDS_STEP if use_seeds else _NO_SEEDS_STEP,
+    )
+
+
+SYSTEM_PROMPT = _format_prompt("", use_seeds=False)
 
 
 def format_domain_guidelines(blueprint: DomainBlueprint) -> str:
@@ -134,9 +189,10 @@ def format_domain_guidelines(blueprint: DomainBlueprint) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(blueprint: DomainBlueprint | None = None) -> str:
-    """Build the agent system prompt, dynamically tailored to the domain blueprint if available."""
-    if blueprint is None:
-        return SYSTEM_PROMPT
-    domain_section = _DOMAIN_SECTION_TEMPLATE.format(guidelines=format_domain_guidelines(blueprint))
-    return BASE_WORKFLOW_TEMPLATE.format(domain_section=domain_section)
+def build_system_prompt(blueprint: DomainBlueprint | None = None, *, use_seeds: bool = False) -> str:
+    """Build the agent system prompt, tailored to the domain blueprint if available, with the
+    seed reuse rules when ``use_seeds`` (seed ontologies are selected for the build)."""
+    domain_section = (
+        _DOMAIN_SECTION_TEMPLATE.format(guidelines=format_domain_guidelines(blueprint)) if blueprint else ""
+    )
+    return _format_prompt(domain_section, use_seeds)

@@ -24,7 +24,8 @@ from cogmaps.ontology.olaf_config import (
     sanitize_ontology_id,
     ttl_path_for,
 )
-from cogmaps.ontology.runner import OntologyJobRunner
+from cogmaps.ontology.runner import OntologyJobRunner, build_seed_ids
+from cogmaps.ontology.seeds import list_seeds
 from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import check_password, is_admin, list_visible_collections
@@ -514,6 +515,25 @@ else:
         help="Tailor the agent's prompt with this collection's domain blueprint. "
              "If none exists yet, one is synthesized at launch. Unticked, the default prompt is used.",
     )
+    try:
+        available_seeds = [s.seed_id for s in list_seeds()]
+    except Exception as e:  # noqa: BLE001
+        available_seeds = []
+        st.warning(f"Could not list the seed ontologies: {e}")
+    if available_seeds:
+        last_seeds = build_seed_ids(_ontology_job_store(), qdrant_col)
+        selected_seeds = st.multiselect(
+            "seed ontologies to reuse",
+            available_seeds,
+            default=[s for s in last_seeds if s in available_seeds],
+            help="Reference ontologies the agent searches and reuses terms from (classes, properties, "
+                 "individuals), under their own URIs — new classes become subclasses of seed classes where "
+                 "that is true. Defaults to the seeds of this collection's last build. "
+                 "Load seeds from /explore ontology/.",
+        )
+    else:
+        selected_seeds = []
+        st.caption("No seed ontology loaded — load reference ontologies from /explore ontology/ to reuse them here.")
 
     if not sb.scaleway_api_key:
         st.warning("Set SCALEWAY_API_KEY to run the ontology-building agent (Scaleway tool-calling only).")
@@ -530,6 +550,7 @@ else:
                 llm_provider="scaleway",
                 llm_model=model,
                 use_domain_discovery=use_domain_discovery,
+                options={"seed_ids": selected_seeds},
             )
             _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
             _activate_job(job_id, "build")
@@ -599,6 +620,12 @@ def _render_reasoning() -> None:
                 help="The agent reads each new inference with why it holds: an absurd one reveals a wrong "
                      "axiom, which it fixes before anything is written. Unticked, inferences are written as is.",
             )
+
+        reasoning_seeds = build_seed_ids(_ontology_job_store(), qdrant_col)
+        st.caption(
+            f"seeds (from the last build): {', '.join(reasoning_seeds)}" if reasoning_seeds
+            else "seeds: none (the last build used no seed ontology)"
+        )
 
         latest = _ontology_job_store().latest_job_for(qdrant_col)
         busy = latest is not None and latest["status"] in ("running", "pending")

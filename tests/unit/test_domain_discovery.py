@@ -235,9 +235,8 @@ def test_domain_section_only_present_with_blueprint(sample_blueprint):
 def test_prompt_keeps_original_olaf_rules():
     prompt = build_system_prompt(None)
     for rule in (
-        "ALWAYS prefer reusing a seed URI over creating a new concept",
         "Pick one relation per pair",
-        "Call `property_search` before every `property_create`",
+        "Call `property_search` and/or `property_semantic_search` before every `property_create`",
         "Never type a URI from memory in `relation_add`",
         "Labels must be space-separated words in title case",
         "Call `ontology_orphans`",
@@ -246,6 +245,17 @@ def test_prompt_keeps_original_olaf_rules():
         assert rule in prompt, rule
     assert "Avoid overly specific classes" not in prompt
     assert "instruments, metrics" not in prompt
+
+
+def test_prompt_has_seed_reuse_rules_only_with_seeds():
+    without = build_system_prompt(None)
+    with_seeds = build_system_prompt(None, use_seeds=True)
+    assert "Reuse seed terms" not in without
+    assert "no seed (reference) ontology is used" in without
+    for rule in ("Reuse seed terms", "seed_reuse(uri, source_chunk_id)", "is-a test", "seed_term_get"):
+        assert rule in with_seeds, rule
+    # The seeds are searched, never exported in full (a seed like FIBO would flood the context).
+    assert "include_seeds=true" not in with_seeds
 
 
 def test_discovery_prompt_does_not_name_internal_collections():
