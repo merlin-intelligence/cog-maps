@@ -19,23 +19,24 @@ from collections.abc import Callable
 
 from qdrant_client import models
 
-from cogmaps.config import domain_discovery_model, oxigraph_url, qdrant_api_key, scaleway_api_key
+from cogmaps.config import domain_discovery_model, oxigraph_url, scaleway_api_key
 from cogmaps.core.llm_impacts import record_llm_impacts
 from cogmaps.ontology.agent import run_build
 from cogmaps.ontology.domain_discovery import discover_domain, load_blueprint
 from cogmaps.ontology.mcp_client import olaf_session
+from cogmaps.ontology.olaf_cli import write_config
 from cogmaps.ontology.olaf_config import (
-    build_config_toml,
     export_oxigraph_ontology_ttl,
     has_ontology_content,
     save_backup,
     ttl_path_for,
 )
 from cogmaps.ontology.reasoning_agent import run_reasoning
+from cogmaps.ontology.seeds import ensure_ontology_index
 from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
 
-__all__ = ["OntologyJobRunner", "final_export", "ttl_path_for"]
+__all__ = ["OntologyJobRunner", "build_seed_ids", "final_export", "ttl_path_for"]
 
 
 # OLAF's chunk-status payload field (``olaf.chunks._STATUS_FIELD``).
@@ -87,6 +88,12 @@ async def final_export(
         if direct_ttl:
             export_cb(direct_ttl)
             log("Final ontology exported via direct Oxigraph connection.")
+
+
+def build_seed_ids(store: OntologyJobStore, collection: str) -> list[str]:
+    """The seeds selected for the collection's latest build — those its ontology reuses terms from."""
+    job = store.latest_job_for(collection, "build")
+    return job["options"].get("seed_ids", []) if job else []
 
 
 class OntologyJobRunner:
@@ -170,9 +177,9 @@ class OntologyJobRunner:
             else:
                 log("Domain discovery disabled for this build — using the default prompt.")
 
-            init_pending_chunks(
-                QdrantStore(self.qdrant_host, self.qdrant_port).client, collection, job["doc_filenames"]
-            )
+            qdrant = QdrantStore(self.qdrant_host, self.qdrant_port).client
+            init_pending_chunks(qdrant, collection, job["doc_filenames"])
+            ensure_ontology_index(job["ontology_id"], config_dir, qdrant, log)
 
             log(f"Starting OLAF (collection={collection!r}, ontology_id={job['ontology_id']!r})")
             async with olaf_session(config_dir) as session:
@@ -185,6 +192,7 @@ class OntologyJobRunner:
                     set_progress=set_progress,
                     export_cb=export_cb,
                     blueprint=blueprint,
+                    seed_ids=job["options"].get("seed_ids", []),
                 )
                 await final_export(session, job["ontology_id"], export_cb=export_cb, log=log)
             self.store.set_status(job_id, "done")
@@ -205,6 +213,9 @@ class OntologyJobRunner:
             def backup_cb(turtle: str) -> None:
                 log(f"Backup of the ontology before any change: {save_backup(collection, turtle)}")
 
+            ensure_ontology_index(
+                job["ontology_id"], config_dir, QdrantStore(self.qdrant_host, self.qdrant_port).client, log,
+            )
             log(f"Starting OLAF reasoning (collection={collection!r}, ontology_id={job['ontology_id']!r})")
             async with olaf_session(config_dir) as session:
                 summary = await run_reasoning(
@@ -222,6 +233,7 @@ class OntologyJobRunner:
                     enrich_disjointness=options.get("enrich_disjointness", True),
                     infer=options.get("infer", True),
                     review_inferences=options.get("review_inferences", True),
+                    seed_ids=build_seed_ids(self.store, collection),
                 )
             self.store.set_result(job_id, summary)
             self.store.set_status(job_id, "done")
@@ -233,16 +245,13 @@ class OntologyJobRunner:
 
     def _write_config(self, config_dir: str, job: dict) -> None:
         """Write the OLAF ``config.toml`` for this job's collection/ontology into ``config_dir``."""
-        config_toml = build_config_toml(
+        write_config(
+            config_dir,
             qdrant_url=f"http://{self.qdrant_host}:{self.qdrant_port}",
             qdrant_collection=job["collection"],
-            qdrant_api_key=qdrant_api_key(),
-            oxigraph_url=oxigraph_url(),
             ontology_id=job["ontology_id"],
             ontology_name=job["collection"],
         )
-        with open(os.path.join(config_dir, "config.toml"), "w", encoding="utf-8") as f:
-            f.write(config_toml)
 
 
 def _ttl_writer(collection: str) -> Callable[[str], None]:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from cogmaps.ontology import cleanup
+from cogmaps.ontology import cleanup, olaf_cli
 
 
 class _FakeCompletedProcess:
@@ -28,6 +28,18 @@ class _FakeQdrantStore:
     def delete_collection(self, name):
         self.deleted.append(name)
         self._collections.remove(name)
+
+
+@pytest.fixture(autouse=True)
+def _no_scratch_graph_cleanup(monkeypatch):
+    """The scratch-graph cleanup talks to Oxigraph: not under test here."""
+    monkeypatch.setattr(olaf_cli, "_drop_scratch_graph", lambda: None)
+
+
+def _olaf_args(cmd: list[str]) -> list[str]:
+    """The ``olaf`` arguments of a command run through the launcher."""
+    assert cmd[1:3] == ["-m", "cogmaps.ontology.olaf_launcher"]
+    return cmd[3:]
 
 
 @pytest.fixture(autouse=True)
@@ -68,12 +80,13 @@ def test_ontology_exists_for_false_on_query_error(monkeypatch):
 def test_delete_ontology_for_collection_runs_olaf_drop_and_cleans_up(tmp_path, monkeypatch):
     captured_cmd = {}
 
-    def _fake_run(cmd, cwd, capture_output, text, timeout):
+    def _fake_run(cmd, **kwargs):
         captured_cmd["cmd"] = cmd
         return _FakeCompletedProcess(returncode=0)
 
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run)
+    monkeypatch.setattr(olaf_cli.subprocess, "run", _fake_run)
 
+    # The olaf_index_ collection is OLAF's to drop; only a legacy olaf_concepts_ one is left to cog-maps.
     fake_store = _FakeQdrantStore(collections=["my_collection", "olaf_concepts_my_collection"])
     monkeypatch.setattr(cleanup, "QdrantStore", lambda host, port: fake_store)
 
@@ -83,7 +96,7 @@ def test_delete_ontology_for_collection_runs_olaf_drop_and_cleans_up(tmp_path, m
 
     messages = cleanup.delete_ontology_for_collection("my_collection", "localhost", 6333)
 
-    assert captured_cmd["cmd"] == ["olaf", "drop", "my_collection"]
+    assert _olaf_args(captured_cmd["cmd"]) == ["drop", "my_collection"]
     assert fake_store.deleted == ["olaf_concepts_my_collection"]
     assert not ttl_file.exists()
     assert any("dropped" in m for m in messages)
@@ -92,7 +105,7 @@ def test_delete_ontology_for_collection_runs_olaf_drop_and_cleans_up(tmp_path, m
 
 
 def test_delete_ontology_for_collection_removes_blueprint(tmp_path, monkeypatch, _isolated_profiles_dir):
-    monkeypatch.setattr(cleanup.subprocess, "run", lambda *a, **kw: _FakeCompletedProcess(returncode=0))
+    monkeypatch.setattr(olaf_cli.subprocess, "run", lambda *a, **kw: _FakeCompletedProcess(returncode=0))
     monkeypatch.setattr(cleanup, "QdrantStore", lambda host, port: _FakeQdrantStore(collections=["my_collection"]))
     monkeypatch.setattr(cleanup, "ttl_path_for", lambda collection: str(tmp_path / "absent.ttl"))
 
@@ -109,11 +122,11 @@ def test_delete_ontology_for_collection_removes_blueprint(tmp_path, monkeypatch,
     assert any("blueprint" in m for m in messages)
 
 
-def test_delete_ontology_for_collection_skips_absent_concepts_collection(tmp_path, monkeypatch):
-    def _fake_run(cmd, cwd, capture_output, text, timeout):
+def test_delete_ontology_for_collection_skips_absent_legacy_collection(tmp_path, monkeypatch):
+    def _fake_run(cmd, **kwargs):
         return _FakeCompletedProcess(returncode=0)
 
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run)
+    monkeypatch.setattr(olaf_cli.subprocess, "run", _fake_run)
 
     fake_store = _FakeQdrantStore(collections=["my_collection"])
     monkeypatch.setattr(cleanup, "QdrantStore", lambda host, port: fake_store)
@@ -127,10 +140,10 @@ def test_delete_ontology_for_collection_skips_absent_concepts_collection(tmp_pat
 
 
 def test_delete_ontology_for_collection_raises_on_subprocess_failure(monkeypatch):
-    def _fake_run(cmd, cwd, capture_output, text, timeout):
+    def _fake_run(cmd, **kwargs):
         return _FakeCompletedProcess(returncode=1, stderr="graph not found")
 
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run)
+    monkeypatch.setattr(olaf_cli.subprocess, "run", _fake_run)
 
     with pytest.raises(RuntimeError, match="graph not found"):
         cleanup.delete_ontology_for_collection("my_collection", "localhost", 6333)
@@ -163,23 +176,23 @@ def test_list_seed_ids_empty_on_query_error(monkeypatch):
 def test_delete_seed_runs_olaf_drop_seed(monkeypatch):
     captured_cmd = {}
 
-    def _fake_run(cmd, cwd, capture_output, text, timeout):
+    def _fake_run(cmd, **kwargs):
         captured_cmd["cmd"] = cmd
         return _FakeCompletedProcess(returncode=0)
 
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run)
+    monkeypatch.setattr(olaf_cli.subprocess, "run", _fake_run)
 
     messages = cleanup.delete_seed("core", "localhost", 6333)
 
-    assert captured_cmd["cmd"] == ["olaf", "drop-seed", "core"]
+    assert _olaf_args(captured_cmd["cmd"]) == ["drop-seed", "core"]
     assert any("core" in m and "dropped" in m for m in messages)
 
 
 def test_delete_seed_raises_on_subprocess_failure(monkeypatch):
-    def _fake_run(cmd, cwd, capture_output, text, timeout):
+    def _fake_run(cmd, **kwargs):
         return _FakeCompletedProcess(returncode=1, stderr="seed not found")
 
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run)
+    monkeypatch.setattr(olaf_cli.subprocess, "run", _fake_run)
 
     with pytest.raises(RuntimeError, match="seed not found"):
         cleanup.delete_seed("nonexistent", "localhost", 6333)

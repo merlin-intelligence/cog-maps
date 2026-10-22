@@ -210,8 +210,9 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   subprocess per build job** (and the Ontology Explorer one per question), with a `config.toml`
   generated on the fly (Qdrant collection, field mapping, Oxigraph URL,
   ontology id derived from the collection name).
-- **Concept embeddings** — OLAF embeds every concept it creates (into the
-  `olaf_concepts_{id}` Qdrant collection) for semantic search and
+- **Semantic index** — OLAF embeds every class, individual and property it
+  creates (into the `olaf_index_{id}` Qdrant collection), and every entity of
+  a seed ontology (into `olaf_index_seed_{seed_id}`), for semantic search and
   deduplication, using **fastembed**. CogMaps makes it use the same model as
   the corpus, `intfloat/multilingual-e5-base`, even though that model is not
   in fastembed's catalog: the subprocess is started as
@@ -226,6 +227,11 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   concept when it *creates* it: concepts created while embedding was broken
   (e.g. before this launcher existed) stay unindexed, and re-running the
   build won't fix them — delete the ontology from `/manage/` and rebuild.
+  Ontologies built by an older OLAF have an `olaf_concepts_{id}` collection
+  (classes only) instead: before a build, a reasoning run or a question,
+  `cogmaps.ontology.seeds.ensure_ontology_index` rebuilds the missing
+  `olaf_index_{id}` from Oxigraph (`olaf reindex <id>`) and deletes the old
+  collection.
 - **Qdrant authentication** — CogMaps' Qdrant requires `QDRANT_API_KEY`
   (Step 3), which [OLAF](https://github.com/merlin-intelligence/olaf)
   supports via `[qdrant].api_key` in `config.toml` (or the `QDRANT_API_KEY`
@@ -291,6 +297,16 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   lists the documents with pending chunks. **Re-launching the build resumes
   where it stopped** — processed chunks are skipped. The 150-iteration cap
   (`MAX_ITERATIONS`) still applies.
+- **Provider rate limits** — Scaleway's quotas are per minute (requests and
+  tokens), and a long build hits them. LLM requests go through
+  `cogmaps.core.llm_impacts.completion_with_retry` (or
+  `acompletion_with_retry` in the async agents), which retries under a
+  `RetryPolicy`: `BACKGROUND_RETRY` for builds, reasoning runs and domain
+  discovery — on HTTP 429 it waits 15, 30, then 60 s (or the provider's
+  `Retry-After`), up to 6 times; a timeout is retried once with a doubled
+  timeout; connection errors and 5xx twice after 10 s — and
+  `INTERACTIVE_RETRY` (about half a minute) when someone waits on a page.
+  Only then does the job fail — re-launching it resumes where it stopped.
 - **Context size** — the whole conversation is sent with every LLM call, and
   Scaleway's quota counts tokens per minute, so the build keeps it small:
   - *one batch at a time* — when the agent reads a new batch of chunks
@@ -312,8 +328,29 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   (`BUILD_TOOLS` in `cogmaps/ontology/agent.py`), since their schemas are sent
   with every call too; calls to any other tool are refused. In particular,
   `ontology_check`, `ontology_infer` and `entity_delete` belong to the reasoning
-  job (below), and `chunk_collection_switch` is left out because the collection
-  is fixed by the job's `config.toml`.
+  job (below), `chunk_collection_switch` is left out because the collection
+  is fixed by the job's `config.toml`, and `seed_load` / `seed_select` because
+  seeds are loaded from the Ontology Explorer and selected on this page.
+  `seed_reuse`, `seed_term_get` and `property_semantic_search`
+  (`SEED_TOOLS`) are added only when seeds are selected for the build.
+- **Seed ontologies** — the **seed ontologies to reuse** field selects, among
+  the seeds loaded in Oxigraph, those the agent may reuse terms from (default:
+  the seeds of the collection's last build; stored in the job's
+  `options["seed_ids"]`). Before the loop, the agent restricts its OLAF
+  session to them (`seed_select` — also with none selected, since OLAF's
+  default is every seed in the store; a seed deleted since is skipped with a
+  warning). Then, as in OLAF's
+  [`olaf_building_agent`](https://github.com/merlin-intelligence/olaf/tree/main/demos/olaf_building_agent):
+  its four searches (`concept_search`, `concept_semantic_search`,
+  `property_search`, `property_semantic_search`) always get
+  `include_seeds=true`; the system prompt gets OLAF's seed reuse rules
+  (same meaning → `seed_reuse` and the seed URI, narrower → a local subclass
+  of it, `seed_term_get` and the is-a test before linking, named entities as
+  individuals of seed classes) instead of exporting the seeds in full; and
+  the first user message — part of the setup, kept across batches — lists
+  the seeds' general classes (those with at least 2 subclasses — candidate
+  parents). Without any seed, the prompt has no seed rules. The reasoning job
+  reuses the seeds of the last build.
 - **Export** — intermediate `ontology_export` calls only overwrite the cached
   `.ttl` when they exclude seeds and actually declare at least one class,
   property or individual (checked by parsing the Turtle with `rdflib`). At the
@@ -380,7 +417,7 @@ pairs declared, inferences materialized, and the problem counts of every check.
   Turtle under `user_data/ontology/backups/<collection>/<date>-<time>.ttl`.
   The **backups before reasoning** expander downloads one or restores it
   (an HTTP graph-store `PUT` replacing `urn:olaf:{ontology_id}` in Oxigraph).
-  Restoring does not touch OLAF's concept index (`olaf_concepts_{id}`).
+  Restoring does not touch OLAF's semantic index (`olaf_index_{id}`).
   Every change is also logged with its full arguments. Backups are removed
   along with the ontology by `/manage/`.
 - **Concurrency** — builds and reasoning runs share the runner's single
@@ -416,9 +453,10 @@ with a target OWL parent class, 8–12 candidate concepts and typical relations.
 
 ### Ontology Explorer (`/explore ontology/`)
 
-Read-only access to the ontologies already built. The page lists the
-collections the user can see (same visibility rules as everywhere else) that
-have an ontology in Oxigraph (`urn:olaf:{ontology_id}`), with three tabs:
+Read-only access to the ontologies already built, and loading of seed
+ontologies. The page lists the collections the user can see (same visibility
+rules as everywhere else) that have an ontology in Oxigraph
+(`urn:olaf:{ontology_id}`), with four tabs:
 
 - **❓ ask** — natural-language questions answered by a search agent
   (`cogmaps.ontology.search_agent`), ported from OLAF's
@@ -427,8 +465,9 @@ have an ontology in Oxigraph (`urn:olaf:{ontology_id}`), with three tabs:
   verbatim from the demo. For each question:
   - an OLAF stdio subprocess is spawned with the same generated `config.toml`
     as a build job, and the agent only sees OLAF's **read-only** tools
-    (`concept_search`, `concept_semantic_search`, `concept_get`,
-    `relation_search`, `chunk_read_batch`, `sparql_query`…) — any other tool
+    (`concept_search`, `concept_semantic_search`, `property_semantic_search`,
+    `concept_get`, `seed_term_get`, `relation_search`, `chunk_read_batch`,
+    `sparql_query`…) — any other tool
     call is refused. It locates the entities, explores around them, writes
     SPARQL when the question needs lists/counts/joins (fixing it when
     Oxigraph rejects it), reads the source chunks, and answers citing them as
@@ -461,18 +500,33 @@ have an ontology in Oxigraph (`urn:olaf:{ontology_id}`), with three tabs:
   for ad-hoc queries. `cogmaps.ontology.oxigraph_client` talks straight to
   Oxigraph's SPARQL 1.1 HTTP `/query` endpoint (never `/update`).
 
+- **🌱 seeds** — the seed ontologies loaded in Oxigraph (`urn:olaf:seed:{id}`),
+  with their triple count and how many entities their semantic index holds.
+  Seeds are global — shared by every user's ontologies — so **only admins**
+  can load one: from an uploaded file (Turtle, RDF/XML/OWL, N-Triples, N3,
+  JSON-LD) or a URL, with an optional seed id (default: derived from the file
+  name or URL, which must then be new; an existing id is replaced) and format
+  (default: guessed). `cogmaps.ontology.seeds` runs OLAF's
+  `olaf load-seed` CLI command through the launcher, which loads the graph
+  and indexes it in Qdrant — a large seed (e.g. FIBO) takes minutes. The CLI
+  is used rather than the `seed_load` MCP tool because it reads local files
+  and accepts URLs on internal hosts (hence admin-only). A seed loaded
+  without an index can be reindexed (`olaf index-seed <id>`). This tab is
+  shown even before any ontology is built, so seeds can be loaded first.
+
 Note that SPARQL — typed in this tab or written by the agent — is not scoped
 to the user's collections: a query naming another graph can read it.
 
 ### Ontology cleanup (`/manage/`)
 
 `cogmaps.ontology.cleanup` adds three danger-zone actions to the Manage page,
-each running OLAF's own CLI drop commands as a short-lived subprocess (same
-config-generation approach as a build job):
+each running OLAF's own CLI drop commands as a short-lived subprocess
+(`cogmaps.ontology.olaf_cli`, same config-generation approach as a build job):
 
 - **Delete entire collection** cascades to delete that collection's ontology
-  too (Oxigraph graph via `olaf drop <id>`, its `olaf_concepts_{id}` Qdrant
-  collection, the cached `.ttl` export and the domain blueprint) — a warning
+  too (Oxigraph graph and `olaf_index_{id}` Qdrant collection via
+  `olaf drop <id>`, a legacy `olaf_concepts_{id}` collection, the cached
+  `.ttl` export and the domain blueprint) — a warning
   is shown before confirming. The blueprint is removed even when no ontology
   was ever built for the collection. **This never goes the other way**: deleting an ontology alone
   never touches the Qdrant collection it was built from.
@@ -481,7 +535,9 @@ config-generation approach as a build job):
   tab first if you want to rebuild with the same one.
 - **Delete seed ontologies** (admin-only) — seeds are global, shared across
   every ontology in the store, so this section is independent of the
-  collection selected above. Runs `olaf drop-seed <id>`.
+  collection selected above. Runs `olaf drop-seed <id>`, which also deletes
+  the seed's `olaf_index_seed_{id}` collection. Ontologies keep the seed
+  terms they reused (copied in by `seed_reuse`).
 
 ## Performance & Stability Optimizations
 
@@ -538,7 +594,7 @@ Navigate between pages from the Streamlit sidebar:
 | `pages/2_Corpus_Analysis.py`| `/analyze corpus/` - Inventory, sizes, wordcloud, embedding-based topic clustering (TF-IDF labels), pairwise semantic similarity |
 | `pages/3_Chat.py`           | `/ask/` - Hybrid RAG question answering against a selected collection |
 | `pages/4_Graph_Explorer.py` | `/explore graphs/` - Subgraph view (Spectral Attention / Semantic Bridge / Supported Diversity nodes) |
-| `pages/5_Ontology_Explorer.py` | `/explore ontology/` - Ask questions over an ontology (search agent + subgraph + source chunks), browse it graphically, run read-only SPARQL queries |
+| `pages/5_Ontology_Explorer.py` | `/explore ontology/` - Ask questions over an ontology (search agent + subgraph + source chunks), browse it graphically, run read-only SPARQL queries, load seed ontologies (admins) |
 | `pages/6_Ontology_Building.py` | `/build ontology/` - Construct an OWL/RDFS ontology from selected documents via OLAF + Oxigraph |
 | `pages/7_Manage.py`         | `/manage/` - List & delete documents per ingestion date; delete collections/ontologies/seeds |
 

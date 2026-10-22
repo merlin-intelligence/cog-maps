@@ -66,6 +66,8 @@ class _FakeSession:
             text = json.dumps({"uri": args["uri"], "label": "Wheel", "triples": [], "source_chunk_ids": []})
         elif name == "sparql_query":
             text = json.dumps({"rows": []})
+        elif name == "seed_list":
+            text = "[]"
         else:
             text = "ok"
         return SimpleNamespace(content=[SimpleNamespace(text=text)])

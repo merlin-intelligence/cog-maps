@@ -28,18 +28,32 @@ _ONTOLOGY_TYPES = (OWL.Class, OWL.ObjectProperty, OWL.DatatypeProperty, OWL.Name
 
 _ONTOLOGY_ID_RE = re.compile(r"[^a-z0-9_]+")
 
-# Matches the [qdrant].concepts_collection prefix rendered by build_config_toml
-# below — the actual Qdrant collection OLAF's EmbeddingService writes to is
-# f"{CONCEPTS_COLLECTION_PREFIX}_{ontology_id}". Shared with cleanup.py so
-# deleting an ontology's concepts collection can't drift out of sync.
-CONCEPTS_COLLECTION_PREFIX = "olaf_concepts"
+# Matches the [qdrant].index_prefix rendered by build_config_toml below — OLAF's
+# semantic index lives in the Qdrant collections f"{INDEX_PREFIX}_{ontology_id}"
+# (one per ontology) and f"{INDEX_PREFIX}_seed_{seed_id}" (one per seed).
+INDEX_PREFIX = "olaf_index"
+
+# Prefix of the per-ontology concepts collections written by OLAF before it
+# renamed them to INDEX_PREFIX — left behind by ontologies built back then,
+# replaced on their next job (see cogmaps.ontology.seeds.ensure_ontology_index).
+LEGACY_CONCEPTS_PREFIX = "olaf_concepts"
+
+
+def index_collection_for(ontology_id: str) -> str:
+    """The Qdrant collection holding the semantic index of an ontology."""
+    return f"{INDEX_PREFIX}_{ontology_id}"
+
+
+def seed_index_collection_for(seed_id: str) -> str:
+    """The Qdrant collection holding the semantic index of a seed."""
+    return f"{INDEX_PREFIX}_seed_{seed_id}"
 
 
 def sanitize_ontology_id(collection: str) -> str:
     """Turn a Qdrant collection name into a valid OLAF ``ontology_id``.
 
     Used as the named-graph suffix (``urn:olaf:{id}``) and the Qdrant
-    concepts-collection suffix (``olaf_concepts_{id}``) — keep it to
+    index-collection suffix (``olaf_index_{id}``) — keep it to
     lowercase alphanumerics/underscores.
     """
     slug = _ONTOLOGY_ID_RE.sub("_", collection.lower()).strip("_")
@@ -81,9 +95,9 @@ def restore_oxigraph_graph(
 ) -> None:
     """Replace the ontology's named graph in Oxigraph with ``ttl`` (HTTP graph store PUT).
 
-    Only the graph is restored: OLAF's semantic index of concepts (the
-    ``olaf_concepts_*`` Qdrant collection) keeps what the reasoning run left
-    there, e.g. without the concepts it merged away.
+    Only the graph is restored: OLAF's semantic index (the ``olaf_index_*``
+    Qdrant collection) keeps what the reasoning run left there, e.g. without
+    the concepts it merged away.
     """
     endpoint = (oxigraph_url or default_oxigraph_url()).rstrip("/")
     req = urllib.request.Request(
@@ -165,7 +179,7 @@ def build_config_toml(
     return f'''[qdrant]
 url                 = "{qdrant_url}"
 collection          = "{qdrant_collection}"
-{api_key_line}concepts_collection = "{CONCEPTS_COLLECTION_PREFIX}"
+{api_key_line}index_prefix        = "{INDEX_PREFIX}"
 
 [qdrant.field_mapping]
 text        = "text"

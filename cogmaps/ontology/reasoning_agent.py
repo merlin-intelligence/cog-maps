@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from mcp import ClientSession
 
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
-from cogmaps.ontology.agent import mcp_tools_to_litellm
+from cogmaps.ontology.agent import mcp_tools_to_litellm, select_seeds
 from cogmaps.ontology.olaf_config import has_ontology_content
 from cogmaps.ontology.reasoning_prompts import (
     DEDUP_PROMPT,
@@ -190,6 +190,7 @@ class ReasoningAgent:
         enrich_disjointness: bool = True,
         infer: bool = True,
         review_inferences: bool = True,
+        seed_ids: list[str] | None = None,
     ) -> None:
         self.session = session
         self.model = model
@@ -207,6 +208,8 @@ class ReasoningAgent:
         self.enrich_disjointness = enrich_disjointness
         self.infer = infer
         self.review_inferences = review_inferences
+        # The seeds the ontology was built with (seed_select): what include_seeds reasons over.
+        self.seed_ids = seed_ids or []
 
         # With an older OLAF, the tools it lacks are simply not offered.
         self.tools = mcp_tools_to_litellm([t for t in mcp_tools if t.name in FIX_TOOLS])
@@ -808,6 +811,8 @@ class ReasoningAgent:
         def step(name: str) -> None:
             self.set_progress(steps.index(name) + 1, len(steps))
             self.log(f"=== Step {steps.index(name) + 1}/{len(steps)}: {name} ===")
+
+        await select_seeds(self.session, self.seed_ids, self.log)
 
         if self.dedup:
             step("dedup")

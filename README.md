@@ -34,6 +34,7 @@ CogMaps is a sophisticated knowledge management and exploration application buil
    - Builds an OWL/RDFS ontology from documents already in Qdrant: a Scaleway tool-calling agent drives [OLAF](https://github.com/merlin-intelligence/olaf) (MCP server) and stores the triples in **Oxigraph** (RDF triplestore, via Docker).
    - Background jobs, like ingestion — an interrupted build can be re-launched and resumes where it stopped (processed chunks are skipped).
    - **Reasoning**: once an ontology is built, a reasoning agent (ported from OLAF's `olaf_reasoning_agent` demo) curates it with the Pellet OWL reasoner — merges duplicate classes, repairs logical problems (inconsistency, unsatisfiable classes, subclass cycles, domain/range violations, unknown terms, orphans…) from the source chunks, declares disjoint sibling classes, then reviews what the ontology entails and writes it in, marked as inferred (drawn dotted in the graph view). The ontology is backed up before any change and can be restored from the page. The OWL reasoner needs Java 11+.
+   - **Seed ontologies**: reference ontologies (FIBO, schema.org, a domain standard…) loaded by admins from a file or a URL on `/explore ontology/` (🌱 seeds tab), shared by every ontology and indexed for semantic search. Each build picks the seeds to reuse: the agent reuses their terms under their own URIs (same meaning) or subclasses them (narrower meaning) instead of re-creating them.
    - Optional **domain discovery**: a per-collection *domain blueprint* (inferred domain + taxonomical pillars), synthesized from a corpus sample or written by hand, tailors the agent's prompt. Opt-in per build.
    - **Ask the ontology**: a read-only search agent (ported from OLAF's `olaf_searching_agent` demo) answers natural-language questions with OLAF's search tools and agent-written SPARQL, then shows the part of the ontology it used (entities + direct neighbors) and the source chunks behind the answer. Follow-up questions keep the conversation's context.
    - Read-only explorer: browse an ontology as a graph or raw Turtle, and run SPARQL queries.
@@ -67,7 +68,7 @@ cogmaps/                      importable package
 ├── jobs/                       async ingestion job system (SQLite store + daemon runner)
 ├── ontology/                   ontology building — OLAF/MCP agent loop, build job runner,
 │                             reasoning agent, domain discovery, search agent, Oxigraph client,
-│                             graph view, cleanup
+│                             graph view, cleanup, seed ontologies
 └── ui/                          Streamlit-only code (auth, components, styles)
 
 streamlit_app.py            entry point — `streamlit run streamlit_app.py`

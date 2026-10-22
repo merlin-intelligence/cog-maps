@@ -1,9 +1,10 @@
-"""Ontology Explorer page — ask questions over an ontology, browse it, run read-only SPARQL."""
+"""Ontology Explorer page — ask questions over an ontology, browse it, run read-only SPARQL, load seed ontologies."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import re
 import tempfile
 
 import pandas as pd
@@ -21,8 +22,15 @@ from cogmaps.ontology.oxigraph_client import (
     run_query,
 )
 from cogmaps.ontology.search_agent import SearchConversation, SearchTurn, ask_collection
+from cogmaps.ontology.seeds import (
+    SEED_FORMATS,
+    index_seed,
+    list_seeds,
+    load_seed_from_file,
+    load_seed_from_url,
+)
 from cogmaps.qdrant.store import QdrantStore
-from cogmaps.ui.auth import check_password, list_visible_collections
+from cogmaps.ui.auth import check_password, is_admin, list_visible_collections
 from cogmaps.ui.components import (
     empty_state,
     render_llm_impacts_footer,
@@ -61,16 +69,121 @@ except SparqlError as e:
     st.error(f"Could not list ontologies: {e}")
     st.stop()
 
+store = QdrantStore(sb.qdrant_host, sb.qdrant_port)
+
+# OLAF's own rule for seed ids (olaf.ontology.seed_graph).
+_SEED_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+_RDF_EXTENSIONS = ["ttl", "turtle", "owl", "rdf", "xml", "nt", "n3", "jsonld", "json"]
+
+
+def _render_seeds() -> None:
+    """The global seed ontologies; admins load new ones from a file or a URL, and reindex them."""
+    st.caption(
+        "Seeds are reference ontologies (FIBO, schema.org, a domain standard…) shared by every ontology. "
+        "A build reuses the terms of the seeds selected for it on /build ontology/: same "
+        "meaning → the seed term's own URI, narrower → a local subclass of it."
+    )
+    if message := st.session_state.pop("seed_message", None):
+        st.success(message)
+
+    try:
+        seeds = list_seeds(store.client)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Could not list the seed ontologies: {e}")
+        seeds = []
+    if seeds:
+        st.dataframe(
+            pd.DataFrame([
+                {"seed": s.seed_id, "graph": f"urn:olaf:seed:{s.seed_id}", "triples": s.triples,
+                 "indexed entities": s.indexed_entities if s.indexed_entities is not None else "not indexed"}
+                for s in seeds
+            ]),
+            hide_index=True, use_container_width=True,
+        )
+    else:
+        st.info("No seed ontology loaded yet.")
+
+    if not is_admin():
+        st.caption("Seeds are shared by all users: only admins can load them.")
+        return
+
+    qdrant_url = f"http://{sb.qdrant_host}:{sb.qdrant_port}"
+    seed_ids = [s.seed_id for s in seeds]
+    with st.container(border=True):
+        st.markdown("**load a seed ontology**")
+        source = st.radio("source", ["file", "URL"], horizontal=True, key="seed_source")
+        if source == "file":
+            upload = st.file_uploader(
+                "RDF file (Turtle, RDF/XML, N-Triples, N3, JSON-LD)", type=_RDF_EXTENSIONS, key="seed_file",
+            )
+        else:
+            url = st.text_input("URL", placeholder="https://spec.edmcouncil.org/fibo/ontology/BE/…", key="seed_url")
+        col_id, col_fmt = st.columns(2)
+        with col_id:
+            seed_id = st.text_input(
+                "seed id (optional)", key="seed_id",
+                help="Letters, digits, '_', '-', '.'. Default: derived from the file name or URL, and then it "
+                     "must be new. The id of a loaded seed replaces it.",
+            ).strip()
+        with col_fmt:
+            fmt = st.selectbox(
+                "format", ["auto", *SEED_FORMATS], key="seed_format",
+                help="Default: guessed from the file extension, the URL's Content-Type or the content.",
+            )
+        if seed_id in seed_ids:
+            st.warning(f"Seed '{seed_id}' is already loaded: loading replaces it.")
+
+        if st.button("⬆ load seed", type="primary"):
+            if seed_id and not _SEED_ID_RE.fullmatch(seed_id):
+                st.error("Invalid seed id: letters, digits, '_', '-', '.' only (64 at most).")
+            elif source == "file" and upload is None:
+                st.warning("Choose a file first.")
+            elif source == "URL" and not url.strip().startswith(("http://", "https://")):
+                st.warning("Enter an http(s) URL.")
+            else:
+                kwargs = {"qdrant_url": qdrant_url, "seed_id": seed_id or None, "fmt": None if fmt == "auto" else fmt}
+                with st.spinner("Loading the seed into Oxigraph and indexing it — a large ontology takes minutes…"):
+                    try:
+                        if source == "file":
+                            report = load_seed_from_file(upload.getvalue(), upload.name, **kwargs)
+                        else:
+                            report = load_seed_from_url(url.strip(), **kwargs)
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"Could not load the seed: {e}")
+                        logger.exception("Seed load failed")
+                    else:
+                        st.session_state["seed_message"] = report or "Seed loaded."
+                        st.rerun()
+
+    if seed_ids:
+        with st.expander("reindex a seed"):
+            st.caption(
+                "Rebuilds a seed's semantic index from Oxigraph — for a seed loaded before seeds were "
+                "indexed (\"not indexed\" above), or whose index was lost."
+            )
+            to_index = st.selectbox("seed", seed_ids, key="seed_to_index")
+            if st.button("↻ reindex", key="seed_reindex"):
+                with st.spinner(f"Indexing seed '{to_index}'…"):
+                    try:
+                        report = index_seed(to_index, qdrant_url=qdrant_url)
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"Could not index the seed: {e}")
+                    else:
+                        st.session_state["seed_message"] = report or "Seed indexed."
+                        st.rerun()
+
+
 # Ontologies are listed through the collections this user can see, not every
 # named graph in Oxigraph — and only those that have been built (the search
 # agent's OLAF would otherwise bootstrap an empty ontology on startup).
-store = QdrantStore(sb.qdrant_host, sb.qdrant_port)
 _with_ontology = [
     (label, qname) for label, qname in list_visible_collections(store.list_collections())
     if f"urn:olaf:{sanitize_ontology_id(qname)}" in graphs
 ]
 if not _with_ontology:
     empty_state("🧬", "No ontology found yet. Go to <strong>/build ontology/</strong> to build one first.")
+    st.markdown("#### 🌱 seed ontologies")
+    _render_seeds()
     st.stop()
 
 col_map = dict(_with_ontology)
@@ -172,7 +285,7 @@ def _render_evidence(turn: SearchTurn, view: dict, key: str) -> None:
         )
 
 
-tab_ask, tab_browse, tab_sparql = st.tabs(["❓ ask", "🕸 browse", "🔎 SPARQL query"])
+tab_ask, tab_browse, tab_sparql, tab_seeds = st.tabs(["❓ ask", "🕸 browse", "🔎 SPARQL query", "🌱 seeds"])
 
 with tab_ask:
     # One conversation per ontology, so switching collection doesn't mix histories.
@@ -285,5 +398,8 @@ with tab_sparql:
                         st.dataframe(pd.DataFrame(rows), use_container_width=True)
             else:
                 st.code(payload, language="turtle")
+
+with tab_seeds:
+    _render_seeds()
 
 render_llm_impacts_footer(session_llm_calls("ontology_explorer"), key="ontology_explorer")

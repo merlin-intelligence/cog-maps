@@ -10,19 +10,22 @@ adapted to:
     (``model="scaleway/<name>"`` + ``api_key``) — the same provider used by
     :mod:`cogmaps.rag.llm_clients`'s ``ScalewayClient``,
   - persist the Turtle via an ``export_cb()`` callback instead of a static
-    file path from a toml.
+    file path from a toml,
+  - take the seeds to reuse from the job (selected on the page) instead of
+    ``[olaf] seed_ids``, and list their general classes in the initial user
+    turn — this agent reads the chunks itself, so there is no per-batch digest.
 """
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from mcp import ClientSession
 
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
 from cogmaps.ontology.olaf_config import has_ontology_content
-from cogmaps.ontology.prompts import SYSTEM_PROMPT, build_system_prompt
+from cogmaps.ontology.prompts import build_system_prompt
 
 if TYPE_CHECKING:
     from cogmaps.ontology.domain_discovery import DomainBlueprint
@@ -35,7 +38,8 @@ MAX_ITERATIONS = 150
 # of OLAF's). Checking, inferring and deleting entities belong to the reasoning
 # agent (cogmaps.ontology.reasoning_agent), run after the build — Pellet is slow,
 # and its report would only distract the extraction — and the chunk collection
-# is fixed by the job's config.toml.
+# is fixed by the job's config.toml. Seeds are loaded from the Ontology Explorer
+# page and selected per job, so seed_load and seed_select are left out.
 BUILD_TOOLS = frozenset({
     "ontology_list",
     "ontology_summary",
@@ -61,10 +65,37 @@ BUILD_TOOLS = frozenset({
     "disjoint_add",
 })
 
+# Added to BUILD_TOOLS when seeds are selected for the build: reusing a seed term,
+# and finding a seed property worded differently.
+SEED_TOOLS = frozenset({"seed_reuse", "seed_term_get", "property_semantic_search"})
+
+# Searches that always cover the seeds selected for the build (OLAF's agent does the same).
+SEED_SEARCH_TOOLS = frozenset({"concept_search", "concept_semantic_search", "property_search", "property_semantic_search"})
+
 # Tool results longer than this are truncated before being sent to the LLM (an
 # export with the seeds once filled the whole context window). Large enough for
 # a chunk_read_batch of 10 chunks.
 MAX_TOOL_RESULT_CHARS = 40_000
+
+# How many of the seeds' general classes the initial user turn lists.
+MAX_SEED_PARENTS = 30
+
+# General classes of the seeds — those with several subclasses there (LegalEntity, Polity,
+# Loan…): the candidate parents of the ontology's new classes. From OLAF's
+# demos/olaf_building_agent/agent.py.
+_SEED_PARENTS_QUERY = """
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+SELECT ?p ?g (SAMPLE(?l) AS ?label) (COUNT(DISTINCT ?c) AS ?children) WHERE {
+    GRAPH ?g {
+        ?c rdfs:subClassOf ?p . ?p a owl:Class .
+        FILTER(isIRI(?c) && isIRI(?p) && !STRSTARTS(STR(?p), "http://www.w3.org/"))
+        OPTIONAL { ?p rdfs:label|skos:prefLabel ?l }
+    }
+    VALUES ?g { __SEED_GRAPHS__ }
+} GROUP BY ?p ?g HAVING(COUNT(DISTINCT ?c) >= 2) ORDER BY DESC(?children) ?p
+"""
 
 # How many times in a row the model may stop while chunks are still pending
 # before the loop gives up (each nudge costs a full completion call).
@@ -105,15 +136,63 @@ def summarise_args(args: dict) -> str:
     return ", ".join(parts)
 
 
-def _build_user_message(doc_filenames: list[str]) -> str:
+def _build_user_message(doc_filenames: list[str], seed_ids: Sequence[str] = (), seed_parents: Sequence[str] = ()) -> str:
     if doc_filenames:
         docs = ", ".join(doc_filenames)
-        return (
+        message = (
             f"Build the ontology from the Qdrant chunks of these {len(doc_filenames)} "
             f"document(s) only: {docs}. Scope every chunk_list call to one of these "
             f"document IDs at a time via the doc_id parameter."
         )
-    return "Build the ontology from all available Qdrant chunks in the collection."
+    else:
+        message = "Build the ontology from all available Qdrant chunks in the collection."
+    if seed_ids:
+        message += f"\n\nSeeds selected for this build: {', '.join(seed_ids)}."
+        if seed_parents:
+            message += (
+                "\n\n## General seed classes — candidate parents: what kind of thing is each new class?\n"
+                + "\n".join(seed_parents)
+            )
+    return message
+
+
+def _local_name(uri: str) -> str:
+    return uri.rstrip("/#").rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+
+
+async def select_seeds(session: ClientSession, seed_ids: list[str], log: Callable[[str], None]) -> list[str]:
+    """Restrict the OLAF session to ``seed_ids`` (``seed_select``) — those still loaded.
+
+    Always called, even with no seed: OLAF's default is every seed in the store.
+    """
+    result = await session.call_tool("seed_list", {})
+    loaded = {s["id"] for s in json.loads(result.content[0].text)} if result.content else set()
+    if missing := [s for s in seed_ids if s not in loaded]:
+        log(f"Warning: seed(s) no longer loaded, skipped: {', '.join(missing)}")
+    selected = [s for s in seed_ids if s in loaded]
+    result = await session.call_tool("seed_select", {"seed_ids": selected})
+    text = result.content[0].text if result.content else ""
+    if text.startswith("Error"):
+        raise RuntimeError(f"seed_select failed: {text}")
+    log(f"Seeds: {', '.join(selected)}" if selected else "Seeds: none")
+    return selected
+
+
+async def _seed_parents(session: ClientSession, seed_ids: list[str], log: Callable[[str], None]) -> list[str]:
+    """User-message lines for the selected seeds' general classes (see _SEED_PARENTS_QUERY)."""
+    graphs = " ".join(f"<urn:olaf:seed:{s}>" for s in seed_ids)
+    query = _SEED_PARENTS_QUERY.replace("__SEED_GRAPHS__", graphs)
+    try:
+        result = await session.call_tool("sparql_query", {"query": query, "limit": MAX_SEED_PARENTS})
+        rows = json.loads(result.content[0].text)["rows"]
+    except Exception as exc:  # noqa: BLE001 — the build goes on: the searches still find seed terms
+        log(f"Warning: could not list the seeds' general classes: {exc}")
+        return []
+    return [
+        f"- {r['label'] or _local_name(r['p'])} <{r['p']}> [seed {(r['g'] or '').removeprefix('urn:olaf:seed:')}, "
+        f"{r['children']} subclasses]"
+        for r in rows
+    ]
 
 
 def compact_history(messages: list[dict[str, Any]], keep_from: int | None = None) -> int:
@@ -197,19 +276,25 @@ async def run_build(
     max_iterations: int = MAX_ITERATIONS,
     blueprint: DomainBlueprint | None = None,
     system_prompt: str | None = None,
+    seed_ids: Sequence[str] = (),
 ) -> None:
     """Run the tool-calling loop against an already-initialized OLAF session.
 
     ``log(message)`` is called for every notable step (tool call + truncated
     result). ``export_cb(turtle)`` is called with the Turtle content whenever
     the model calls ``ontology_export``. ``set_progress(current, total)``
-    tracks loop iterations for the page's progress bar.
+    tracks loop iterations for the page's progress bar. ``seed_ids`` are the
+    seed ontologies the agent may reuse terms from (none if empty).
     """
+    seed_ids = await select_seeds(session, list(seed_ids), log)
+    allowed = BUILD_TOOLS | SEED_TOOLS if seed_ids else BUILD_TOOLS
+    forced_args = {t: {"include_seeds": True} for t in SEED_SEARCH_TOOLS} if seed_ids else {}
+
     tools_result = await session.list_tools()
-    tools = mcp_tools_to_litellm([t for t in tools_result.tools if t.name in BUILD_TOOLS])
+    tools = mcp_tools_to_litellm([t for t in tools_result.tools if t.name in allowed])
     log(f"Loaded {len(tools)} OLAF tools.")
 
-    active_prompt = system_prompt or (build_system_prompt(blueprint) if blueprint else SYSTEM_PROMPT)
+    active_prompt = system_prompt or build_system_prompt(blueprint, use_seeds=bool(seed_ids))
     if blueprint:
         log(f"Configured agent with dynamic domain blueprint: '{blueprint.inferred_domain}' ({len(blueprint.pillars)} pillars)")
     else:
@@ -217,7 +302,9 @@ async def run_build(
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": active_prompt},
-        {"role": "user", "content": _build_user_message(doc_filenames)},
+        {"role": "user", "content": _build_user_message(
+            doc_filenames, seed_ids, await _seed_parents(session, seed_ids, log) if seed_ids else [],
+        )},
     ]
 
     total_tool_calls = 0
@@ -310,11 +397,12 @@ async def run_build(
                 tool_args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
                 tool_args = {}
+            tool_args = {**tool_args, **forced_args.get(tool_name, {})}
 
             log(f"Tool call: {tool_name}({summarise_args(tool_args)})")
             total_tool_calls += 1
 
-            if tool_name not in BUILD_TOOLS:
+            if tool_name not in allowed:
                 content = f"Error: {tool_name} is not available while building."
             else:
                 try:
