@@ -22,7 +22,12 @@ from qdrant_client import models
 from cogmaps.config import domain_discovery_model, oxigraph_url, scaleway_api_key
 from cogmaps.core.llm_impacts import record_llm_impacts
 from cogmaps.ontology.agent import run_build
-from cogmaps.ontology.domain_discovery import discover_domain, load_blueprint
+from cogmaps.ontology.domain_discovery import (
+    DomainBlueprint,
+    discover_domain,
+    load_blueprint,
+    load_manual_guidelines,
+)
 from cogmaps.ontology.mcp_client import olaf_session
 from cogmaps.ontology.olaf_cli import write_config
 from cogmaps.ontology.olaf_config import (
@@ -36,7 +41,7 @@ from cogmaps.ontology.seeds import ensure_ontology_index
 from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
 
-__all__ = ["OntologyJobRunner", "build_seed_ids", "final_export", "ttl_path_for"]
+__all__ = ["OntologyJobRunner", "build_domain_mode", "build_seed_ids", "final_export", "ttl_path_for"]
 
 
 # OLAF's chunk-status payload field (``olaf.chunks._STATUS_FIELD``).
@@ -88,6 +93,18 @@ async def final_export(
         if direct_ttl:
             export_cb(direct_ttl)
             log("Final ontology exported via direct Oxigraph connection.")
+
+
+def job_domain_mode(job: dict) -> str:
+    """Where a build's domain guidance comes from: "none", "llm" (discovered blueprint) or
+    "manual" (hand-written guidelines). Jobs from before the choice only had the LLM option."""
+    return job["options"].get("domain_mode") or ("llm" if job["use_domain_discovery"] else "none")
+
+
+def build_domain_mode(store: OntologyJobStore, collection: str) -> str:
+    """The domain guidance mode of the collection's latest build ("none" if never built)."""
+    job = store.latest_job_for(collection, "build")
+    return job_domain_mode(job) if job else "none"
 
 
 def build_seed_ids(store: OntologyJobStore, collection: str) -> list[str]:
@@ -154,9 +171,17 @@ class OntologyJobRunner:
             self._write_config(config_dir, job)
             export_cb = _ttl_writer(collection)
 
-            # ── Domain discovery (optional, opted into per job) ──
+            # ── Domain guidance (optional, chosen per job) ──
             blueprint = None
-            if job["use_domain_discovery"]:
+            domain_mode = job_domain_mode(job)
+            if domain_mode == "manual":
+                guidelines = load_manual_guidelines(collection)
+                if guidelines:
+                    blueprint = DomainBlueprint(inferred_domain=collection, guidelines=guidelines)
+                    log("Domain guidance: using the hand-written guidelines.")
+                else:
+                    log("Domain guidance: no hand-written guidelines saved — using the default prompt.")
+            elif domain_mode == "llm":
                 log(f"Domain discovery: resolving domain blueprint for collection {collection!r}...")
                 blueprint = load_blueprint(collection)
                 if blueprint is None:
@@ -173,9 +198,10 @@ class OntologyJobRunner:
                         log(f"Domain discovery warning: failed ({e}), proceeding with default prompt.")
                         blueprint = None
                 else:
-                    log(f"Domain discovery: loaded cached blueprint -> '{blueprint.inferred_domain}' ({len(blueprint.pillars)} pillars).")
+                    detail = "hand-written guidelines" if blueprint.guidelines else f"{len(blueprint.pillars)} pillars"
+                    log(f"Domain discovery: loaded cached blueprint -> '{blueprint.inferred_domain}' ({detail}).")
             else:
-                log("Domain discovery disabled for this build — using the default prompt.")
+                log("No domain guidance for this build — using the default prompt.")
 
             qdrant = QdrantStore(self.qdrant_host, self.qdrant_port).client
             init_pending_chunks(qdrant, collection, job["doc_filenames"])

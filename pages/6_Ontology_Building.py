@@ -9,11 +9,11 @@ import streamlit as st
 from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, TEMP_GRAPH_OUTPUTS, domain_discovery_model, oxigraph_url
 from cogmaps.core.llm_impacts import LLMCallImpact, record_llm_impacts
 from cogmaps.ontology.domain_discovery import (
-    DomainBlueprint,
-    DomainPillar,
     discover_domain,
     load_blueprint,
+    load_manual_guidelines,
     save_blueprint,
+    save_manual_guidelines,
 )
 from cogmaps.ontology.graph import build_pyvis_html
 from cogmaps.ontology.olaf_config import (
@@ -24,7 +24,8 @@ from cogmaps.ontology.olaf_config import (
     sanitize_ontology_id,
     ttl_path_for,
 )
-from cogmaps.ontology.runner import OntologyJobRunner, build_seed_ids
+from cogmaps.ontology.prompts import format_domain_guidelines
+from cogmaps.ontology.runner import OntologyJobRunner, build_domain_mode, build_seed_ids
 from cogmaps.ontology.seeds import list_seeds
 from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
@@ -265,10 +266,9 @@ def _blueprint_version_key(collection: str) -> str:
 def _blueprint_changed(message: str | None = None) -> None:
     """Call after the saved blueprint changes, right before st.rerun().
 
-    Bumps the version embedded in the editor widgets' keys so they are
-    rebuilt from the saved blueprint — otherwise Streamlit keeps each keyed
-    widget's previous value (a ticked "Remove" checkbox, a filled "Add New
-    Pillar" field…) and applies it to whatever pillar now sits at that index.
+    Bumps the version embedded in the editor widget's key so it is rebuilt
+    from the saved blueprint — otherwise Streamlit keeps the text previously
+    typed instead of showing, say, a fresh discovery.
     Also queues ``message`` to display after the rerun.
     """
     key = _blueprint_version_key(qdrant_col)
@@ -292,209 +292,113 @@ def _run_discovery() -> None:
     st.rerun()
 
 
-def _parse_csv(text: str) -> list[str]:
-    return [item.strip() for item in text.split(",") if item.strip()]
+# Starting point of guidelines written by hand: the shape of the generated ones.
+_GUIDELINES_TEMPLATE = """When analyzing <your domain> text, systematically identify and extract:
+1. **<First dimension> (`owl:Class` subClassOf <ParentClass>):**
+   Candidate concepts: <Concept A>, <Concept B>, <Concept C>.
+   Expected relations: <relationA>, <relationB>.
+2. **<Second dimension> (`owl:Class` subClassOf <ParentClass>):**
+   Candidate concepts: ...
+3. **Key Institutions & Specific Named Individuals (`owl:NamedIndividual`):**
+   Concrete named entities with unique identity, e.g. <entity categories>.
+   Use `individual_create` with the URI of the `owl:Class` this entity is an instance of.
+
+### Cross-Pillar Relationships & Interconnections:
+- <theme linking two dimensions>
+"""
 
 
-def _parse_lines(text: str) -> list[str]:
-    return [line.strip().lstrip("-*• ") for line in text.splitlines() if line.strip()]
+_DOMAIN_MODES = {
+    "none": "none — default prompt",
+    "llm": "LLM discovery",
+    "manual": "written by hand",
+}
 
-
-blueprint = load_blueprint(qdrant_col)
 _flash_msg = st.session_state.pop("ontology_blueprint_flash", None)
 # Prefix for every editor widget key; changes whenever the saved blueprint does.
 _bp_key = f"{qdrant_col}_v{st.session_state.get(_blueprint_version_key(qdrant_col), 0)}"
 with st.container(border=True):
     if _flash_msg:
         st.success(_flash_msg)
-    col_d1, col_d2 = st.columns([0.72, 0.28], vertical_alignment="center")
-    with col_d1:
-        st.markdown("#### 🧬 Domain discovery")
-        if blueprint:
-            st.markdown(
-                f"**Inferred Domain:** {blueprint.inferred_domain} &nbsp;·&nbsp; "
-                f"`{blueprint.epistemological_nature}`"
-            )
-            if blueprint.generated_at:
-                st.caption(
-                    f"discovered {blueprint.generated_at[:16].replace('T', ' ')} "
-                    f"from {blueprint.source_document_count} document(s)"
+    st.markdown("#### 🧬 Domain guidance")
+    domain_mode = st.radio(
+        "domain guidance",
+        list(_DOMAIN_MODES),
+        index=list(_DOMAIN_MODES).index(build_domain_mode(_ontology_job_store(), qdrant_col)),
+        format_func=_DOMAIN_MODES.get,
+        horizontal=True,
+        label_visibility="collapsed",
+        key=f"domain_mode_{qdrant_col}",
+        help="Optional text added to the agent's prompt to tailor it to this corpus. "
+             "Defaults to the choice of this collection's last build.",
+    )
+
+    if domain_mode == "none":
+        st.caption("The agent uses the default, domain-neutral prompt.")
+
+    elif domain_mode == "llm":
+        blueprint = load_blueprint(qdrant_col)
+        col_d1, col_d2 = st.columns([0.72, 0.28], vertical_alignment="center")
+        with col_d1:
+            if blueprint:
+                st.markdown(
+                    f"**Inferred Domain:** {blueprint.inferred_domain} &nbsp;·&nbsp; "
+                    f"`{blueprint.epistemological_nature}`"
                 )
+                if blueprint.generated_at:
+                    st.caption(
+                        f"discovered {blueprint.generated_at[:16].replace('T', ' ')} "
+                        f"from {blueprint.source_document_count} document(s)"
+                        + (" · ✍️ edited by hand" if blueprint.guidelines else "")
+                    )
                 if blueprint.source_document_count is not None and blueprint.source_document_count != len(filenames):
                     st.warning(
                         f"The collection now has {len(filenames)} document(s) — "
                         "this blueprint may be out of date. Consider re-discovering."
                     )
             else:
-                st.caption("hand-made blueprint")
-        else:
-            st.info(
-                "Optional: a domain blueprint tailors the agent's prompt to this corpus. "
-                f"Run discovery (**{_discovery_model}**) or create one by hand, then tick "
-                "**use domain discovery** at launch. Without it, the default prompt is used."
-            )
-    with col_d2:
+                st.caption(
+                    f"Not discovered yet: run it now to review and edit the result, or it runs "
+                    f"at launch (**{_discovery_model}**)."
+                )
+        with col_d2:
+            if blueprint:
+                # Replaces the text, hand edits included: confirm first.
+                with st.popover("↻ re-discover", use_container_width=True):
+                    st.caption("Replaces the current text — and your edits — with a new LLM discovery.")
+                    if st.button("confirm re-discover", key=f"bp_rediscover_{_bp_key}"):
+                        _run_discovery()
+            elif st.button("🔍 discover", use_container_width=True):
+                _run_discovery()
+
         if blueprint:
-            if st.button("↻ re-discover", use_container_width=True):
-                _run_discovery()
-        else:
-            # Stacked rather than side by side: the column is too narrow for two labels.
-            if st.button("🔍 discover", use_container_width=True):
-                _run_discovery()
-            if st.button("✏️ create custom", use_container_width=True):
-                blueprint = DomainBlueprint(
-                    inferred_domain=f"Custom Domain ({collection_name})",
-                    epistemological_nature="Empirical",
-                    pillars=[
-                        DomainPillar(
-                            name="Core Concepts",
-                            target_parent_class="Concept",
-                            sample_classes=[],
-                            typical_relations=[],
-                        )
-                    ],
+            with st.form(key=f"edit_blueprint_text_{_bp_key}"):
+                guidelines_text = st.text_area(
+                    "Discovered guidelines — edit them freely (markdown)",
+                    value=format_domain_guidelines(blueprint),
+                    height=420,
+                    key=f"bp_text_{_bp_key}",
                 )
-                save_blueprint(qdrant_col, blueprint)
-                _blueprint_changed()
-                st.rerun()
-
-    if blueprint:
-        tab_view, tab_form, tab_json = st.tabs(["👁️ Overview", "✏️ Form Editor", "🧬 Raw JSON"])
-
-        with tab_view:
-            for p in blueprint.pillars:
-                parent_str = f" *(subClassOf `{p.target_parent_class}`)*" if p.target_parent_class else ""
-                st.markdown(f"**• {p.name}**{parent_str}")
-                if p.sample_classes:
-                    st.caption(f"Concepts: {', '.join(p.sample_classes)}")
-                if p.typical_relations:
-                    st.caption(f"Relations: {', '.join(p.typical_relations)}")
-            if blueprint.individual_types:
-                st.markdown(f"**• Individual Types:** {', '.join(blueprint.individual_types)}")
-            if blueprint.cross_cutting_themes:
-                st.markdown("**• Cross-Cutting Inter-Pillar Themes:**")
-                for theme in blueprint.cross_cutting_themes:
-                    st.markdown(f"  - {theme}")
-            if blueprint.suggested_object_properties:
-                st.caption(f"Suggested Object Properties: {', '.join(blueprint.suggested_object_properties)}")
-
-        with tab_form:
-            st.caption("Edit the domain properties, taxonomical dimensions, and entity types. Submit to save changes.")
-            with st.form(key=f"edit_blueprint_form_{_bp_key}"):
-                new_domain = st.text_input("Inferred Domain", value=blueprint.inferred_domain, key=f"bp_domain_{_bp_key}")
-                nature_options = ["Empirical", "Deontic", "Interdisciplinary", "Formal", "Normative"]
-                # Keep a value the model returned outside the preset list instead of silently coercing it.
-                if blueprint.epistemological_nature and blueprint.epistemological_nature not in nature_options:
-                    nature_options.insert(0, blueprint.epistemological_nature)
-                current_nature = blueprint.epistemological_nature or "Interdisciplinary"
-                new_nature = st.selectbox(
-                    "Epistemological Nature",
-                    nature_options,
-                    index=nature_options.index(current_nature),
-                    key=f"bp_nature_{_bp_key}",
-                )
-
-                st.markdown("##### Taxonomical Pillars")
-                updated_pillars = []
-                for idx, pillar in enumerate(blueprint.pillars):
-                    with st.expander(f"Pillar {idx + 1}: {pillar.name}", expanded=False):
-                        p_name = st.text_input("Pillar Name", value=pillar.name, key=f"p_name_{_bp_key}_{idx}")
-                        p_parent = st.text_input(
-                            "Target Parent Class",
-                            value=pillar.target_parent_class,
-                            key=f"p_parent_{_bp_key}_{idx}",
-                            help="Universal root OWL class to anchor concepts under (e.g. Asset, LegalNorm, CognitiveProcess)",
-                        )
-                        p_classes_str = st.text_area(
-                            "Candidate Concepts (comma-separated)",
-                            value=", ".join(pillar.sample_classes),
-                            key=f"p_classes_{_bp_key}_{idx}",
-                        )
-                        p_relations_str = st.text_input(
-                            "Typical Relations (comma-separated)",
-                            value=", ".join(pillar.typical_relations),
-                            key=f"p_relations_{_bp_key}_{idx}",
-                        )
-                        p_remove = st.checkbox("Remove this pillar", key=f"p_remove_{_bp_key}_{idx}")
-                        if not p_remove and p_name.strip():
-                            updated_pillars.append(
-                                DomainPillar(
-                                    name=p_name.strip(),
-                                    target_parent_class=p_parent.strip(),
-                                    sample_classes=_parse_csv(p_classes_str),
-                                    typical_relations=_parse_csv(p_relations_str),
-                                )
-                            )
-
-                with st.expander("➕ Add New Pillar", expanded=False):
-                    new_p_name = st.text_input("New Pillar Name", key=f"new_p_name_{_bp_key}")
-                    new_p_parent = st.text_input("New Target Parent Class", key=f"new_p_parent_{_bp_key}")
-                    new_p_classes = st.text_area("New Candidate Concepts (comma-separated)", key=f"new_p_classes_{_bp_key}")
-                    new_p_relations = st.text_input("New Typical Relations (comma-separated)", key=f"new_p_relations_{_bp_key}")
-                    if new_p_name.strip():
-                        updated_pillars.append(
-                            DomainPillar(
-                                name=new_p_name.strip(),
-                                target_parent_class=new_p_parent.strip(),
-                                sample_classes=_parse_csv(new_p_classes),
-                                typical_relations=_parse_csv(new_p_relations),
-                            )
-                        )
-
-                st.markdown("##### Entity Categories & Relationships")
-                ind_types_str = st.text_area(
-                    "Individual Types (comma-separated)",
-                    value=", ".join(blueprint.individual_types),
-                    key=f"bp_ind_types_{_bp_key}",
-                    help="Categories for owl:NamedIndividual (e.g. Theorist, Agency, Specific Index)",
-                )
-                obj_props_str = st.text_area(
-                    "Suggested Object Properties (comma-separated)",
-                    value=", ".join(blueprint.suggested_object_properties),
-                    key=f"bp_obj_props_{_bp_key}",
-                    help="Key directed properties connecting classes across pillars",
-                )
-                cross_cutting_str = st.text_area(
-                    "Cross-Cutting Inter-Pillar Themes (one per line)",
-                    value="\n".join(blueprint.cross_cutting_themes),
-                    key=f"bp_themes_{_bp_key}",
-                    help="Thematic bridges linking different pillars to prevent disconnected clusters",
-                )
-
-                submit_form = st.form_submit_button("💾 Save Form Changes", type="primary")
-                if submit_form:
-                    updated_bp = DomainBlueprint(
-                        inferred_domain=new_domain.strip(),
-                        epistemological_nature=new_nature,
-                        pillars=updated_pillars,
-                        individual_types=_parse_csv(ind_types_str),
-                        suggested_object_properties=_parse_csv(obj_props_str),
-                        cross_cutting_themes=_parse_lines(cross_cutting_str),
-                        generated_at=blueprint.generated_at,
-                        source_document_count=blueprint.source_document_count,
-                    )
-                    save_blueprint(qdrant_col, updated_bp)
-                    _blueprint_changed("Domain blueprint updated and saved successfully!")
+                if st.form_submit_button("💾 Save", type="primary"):
+                    blueprint.guidelines = guidelines_text.strip() or None
+                    save_blueprint(qdrant_col, blueprint)
+                    _blueprint_changed("Domain guidelines saved!")
                     st.rerun()
 
-        with tab_json:
-            st.caption("Directly inspect and modify the raw JSON representation of the domain blueprint.")
-            with st.form(key=f"edit_blueprint_json_{_bp_key}"):
-                json_content = st.text_area(
-                    "Blueprint JSON",
-                    value=blueprint.model_dump_json(indent=2),
-                    height=420,
-                    key=f"bp_json_{_bp_key}",
-                )
-                submit_json = st.form_submit_button("💾 Save JSON Changes", type="primary")
-                if submit_json:
-                    try:
-                        new_bp = DomainBlueprint.model_validate_json(json_content)
-                        save_blueprint(qdrant_col, new_bp)
-                        _blueprint_changed("Domain blueprint JSON saved successfully!")
-                        st.rerun()
-                    except Exception as err:
-                        st.error(f"Invalid DomainBlueprint JSON: {err}")
+    else:
+        with st.form(key=f"edit_manual_guidelines_{_bp_key}"):
+            manual_text = st.text_area(
+                "Your guidelines (markdown)",
+                value=load_manual_guidelines(qdrant_col) or _GUIDELINES_TEMPLATE,
+                height=420,
+                key=f"manual_text_{_bp_key}",
+            )
+            if st.form_submit_button("💾 Save", type="primary"):
+                save_manual_guidelines(qdrant_col, manual_text.strip())
+                _blueprint_changed("Domain guidelines saved!")
+                st.rerun()
+        if not load_manual_guidelines(qdrant_col):
+            st.caption("Not saved yet — the build only uses saved text.")
 
 # ── Document selection & launch ─────────────────────────────────────────
 
@@ -509,12 +413,6 @@ else:
              "processed in a previous build are skipped automatically.",
     )
     model = st.selectbox("model (tool-calling)", ONTOLOGY_TOOLCALL_MODELS)
-    use_domain_discovery = st.checkbox(
-        "use domain discovery",
-        value=False,
-        help="Tailor the agent's prompt with this collection's domain blueprint. "
-             "If none exists yet, one is synthesized at launch. Unticked, the default prompt is used.",
-    )
     try:
         available_seeds = [s.seed_id for s in list_seeds()]
     except Exception as e:  # noqa: BLE001
@@ -549,8 +447,8 @@ else:
                 doc_filenames=selected_docs,
                 llm_provider="scaleway",
                 llm_model=model,
-                use_domain_discovery=use_domain_discovery,
-                options={"seed_ids": selected_seeds},
+                use_domain_discovery=domain_mode != "none",
+                options={"seed_ids": selected_seeds, "domain_mode": domain_mode},
             )
             _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
             _activate_job(job_id, "build")
