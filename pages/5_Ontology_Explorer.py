@@ -10,8 +10,9 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, TEMP_GRAPH_OUTPUTS, oxigraph_url
+from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, oxigraph_url
 from cogmaps.core.llm_impacts import record_llm_impacts
+from cogmaps.ontology.explorer_view import build_explorer_html
 from cogmaps.ontology.graph import build_pyvis_html, extract_subgraph
 from cogmaps.ontology.olaf_config import sanitize_ontology_id
 from cogmaps.ontology.oxigraph_client import (
@@ -354,13 +355,8 @@ with tab_browse:
         if not ttl.strip():
             empty_state("🧬", "This ontology graph is empty.")
         else:
-            graph_dir = os.path.join(str(TEMP_GRAPH_OUTPUTS), "ontology_explorer")
-            os.makedirs(graph_dir, exist_ok=True)
-            html_path = os.path.join(graph_dir, f"{ontology_id}.html")
             try:
-                build_pyvis_html(ttl, html_path, show_physics_controls=False)
-                with open(html_path, encoding="utf-8") as f:
-                    st.components.v1.html(f.read(), height=850, scrolling=True)
+                st.components.v1.html(build_explorer_html(ttl, title=collection_name), height=850)
             except Exception as e:  # noqa: BLE001
                 st.error(f"Could not render the graph view: {e}")
 
