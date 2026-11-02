@@ -81,6 +81,11 @@ class DomainBlueprint(BaseModel):
         default=None,
         description="Number of documents in the collection when discovery ran (None if hand-made)",
     )
+    guidelines: str | None = Field(
+        default=None,
+        description="Hand-written domain guidelines, injected into the prompt verbatim instead of "
+                    "the text generated from the fields above (None to use the generated text)",
+    )
 
 
 # ─── Stage 1: Stratified Corpus Profiling ───────────────────────────────────
@@ -350,13 +355,41 @@ def save_blueprint(collection: str, blueprint: DomainBlueprint, base_dir: str | 
 
 
 def delete_blueprint(collection: str, base_dir: str | None = None) -> bool:
-    """Remove a collection's cached DomainBlueprint. Returns False if there was none."""
-    path = profile_path_for(collection, base_dir)
+    """Remove a collection's cached DomainBlueprint and hand-written guidelines.
+    Returns False if there was neither."""
+    deleted = False
+    for path in (profile_path_for(collection, base_dir), manual_guidelines_path_for(collection, base_dir)):
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info("Deleted domain guidance for %s (%s)", collection, path)
+            deleted = True
+    return deleted
+
+
+# ─── Hand-written guidelines (the alternative to discovery) ─────────────────
+
+def manual_guidelines_path_for(collection: str, base_dir: str | None = None) -> str:
+    """Path to the hand-written domain guidelines of a collection, kept apart from the
+    discovered blueprint so that switching between the two loses neither."""
+    directory = base_dir or domain_profiles_dir()
+    return os.path.join(directory, f"{sanitize_ontology_id(collection)}.manual.md")
+
+
+def save_manual_guidelines(collection: str, text: str, base_dir: str | None = None) -> str:
+    path = manual_guidelines_path_for(collection, base_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
+
+def load_manual_guidelines(collection: str, base_dir: str | None = None) -> str | None:
+    """The collection's hand-written domain guidelines, or None if there are none (or blank)."""
+    path = manual_guidelines_path_for(collection, base_dir)
     if not os.path.exists(path):
-        return False
-    os.remove(path)
-    logger.info("Deleted domain blueprint for %s (%s)", collection, path)
-    return True
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip() or None
 
 
 def load_blueprint(collection: str, base_dir: str | None = None) -> DomainBlueprint | None:

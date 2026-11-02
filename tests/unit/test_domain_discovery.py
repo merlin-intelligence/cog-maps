@@ -22,6 +22,7 @@ from cogmaps.ontology.prompts import (
     SYSTEM_PROMPT,
     build_system_prompt,
     format_domain_guidelines,
+    generated_domain_guidelines,
 )
 
 
@@ -100,6 +101,26 @@ def test_build_system_prompt_dynamic(sample_blueprint):
     assert "Target Density & Coverage" in prompt
     assert "Workflow — follow this order" in prompt
     assert "TreasuryBond" in prompt
+
+
+def test_hand_written_guidelines_replace_generated_text(sample_blueprint):
+    sample_blueprint.guidelines = "  Extract every **monetary policy** tool.\n"
+    assert format_domain_guidelines(sample_blueprint) == "Extract every **monetary policy** tool."
+    prompt = build_system_prompt(sample_blueprint)
+    assert "Extract every **monetary policy** tool." in prompt
+    assert "TreasuryBond" not in prompt
+
+
+def test_blank_guidelines_fall_back_to_generated_text(sample_blueprint):
+    sample_blueprint.guidelines = "   "
+    assert format_domain_guidelines(sample_blueprint) == generated_domain_guidelines(sample_blueprint)
+    assert "TreasuryBond" in format_domain_guidelines(sample_blueprint)
+
+
+def test_guidelines_survive_save_and_load(tmp_path, sample_blueprint):
+    sample_blueprint.guidelines = "My own guidelines"
+    save_blueprint("col", sample_blueprint, base_dir=str(tmp_path))
+    assert load_blueprint("col", base_dir=str(tmp_path)).guidelines == "My own guidelines"
 
 
 def test_build_system_prompt_default_fallback():
@@ -286,3 +307,36 @@ def test_old_blueprint_json_without_provenance_still_loads(tmp_path):
     assert bp is not None
     assert bp.generated_at is None
     assert bp.source_document_count is None
+
+
+def test_manual_guidelines_round_trip_apart_from_blueprint(tmp_path, sample_blueprint):
+    from cogmaps.ontology.domain_discovery import load_manual_guidelines, save_manual_guidelines
+
+    assert load_manual_guidelines("col", base_dir=str(tmp_path)) is None
+    save_blueprint("col", sample_blueprint, base_dir=str(tmp_path))
+    save_manual_guidelines("col", "My own text", base_dir=str(tmp_path))
+    assert load_manual_guidelines("col", base_dir=str(tmp_path)) == "My own text"
+    assert load_blueprint("col", base_dir=str(tmp_path)).guidelines is None
+
+    save_manual_guidelines("col", "   ", base_dir=str(tmp_path))
+    assert load_manual_guidelines("col", base_dir=str(tmp_path)) is None
+
+
+def test_delete_blueprint_also_removes_manual_guidelines(tmp_path):
+    from cogmaps.ontology.domain_discovery import load_manual_guidelines, save_manual_guidelines
+
+    save_manual_guidelines("col", "My own text", base_dir=str(tmp_path))
+    assert delete_blueprint("col", base_dir=str(tmp_path)) is True
+    assert load_manual_guidelines("col", base_dir=str(tmp_path)) is None
+
+
+@pytest.mark.parametrize("options, use_discovery, expected", [
+    ({"domain_mode": "manual"}, True, "manual"),
+    ({"domain_mode": "none"}, False, "none"),
+    ({}, True, "llm"),   # jobs from before the choice
+    ({}, False, "none"),
+])
+def test_job_domain_mode(options, use_discovery, expected):
+    from cogmaps.ontology.runner import job_domain_mode
+
+    assert job_domain_mode({"options": options, "use_domain_discovery": use_discovery}) == expected

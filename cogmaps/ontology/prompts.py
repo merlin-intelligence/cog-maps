@@ -166,7 +166,15 @@ SYSTEM_PROMPT = _format_prompt("", use_seeds=False)
 
 
 def format_domain_guidelines(blueprint: DomainBlueprint) -> str:
-    """Format a DomainBlueprint into markdown guidelines for the system prompt."""
+    """Domain guidelines for the system prompt: the blueprint's hand-written text if it has
+    one, otherwise the text generated from its structured fields."""
+    if blueprint.guidelines and blueprint.guidelines.strip():
+        return blueprint.guidelines.strip()
+    return generated_domain_guidelines(blueprint)
+
+
+def generated_domain_guidelines(blueprint: DomainBlueprint) -> str:
+    """Format a DomainBlueprint's structured fields into markdown guidelines for the system prompt."""
     nature_str = f" ({blueprint.epistemological_nature})" if blueprint.epistemological_nature else ""
     lines = [
         f"When analyzing {blueprint.inferred_domain}{nature_str} text, systematically identify and extract:"
