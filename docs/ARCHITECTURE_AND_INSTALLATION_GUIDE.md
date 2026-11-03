@@ -196,7 +196,7 @@ docker run --rm -v qdrant_storage:/data:ro -v "$(pwd)":/backup \
 
 ### Ontology Building (`/build ontology/`) — Oxigraph + OLAF
 
-This page builds an OWL/RDFS ontology from a corpus already in Qdrant, using
+This page builds OWL/RDFS ontologies from a corpus already in Qdrant, using
 [OLAF](https://github.com/merlin-intelligence/olaf) (an MCP server exposing
 ontology-CRUD tools) driven by a tool-calling LLM agent.
 
@@ -209,7 +209,21 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   `cogmaps.ontology.runner.OntologyJobRunner` spawns a fresh OLAF **stdio
   subprocess per build job** (and the Ontology Explorer one per question), with a `config.toml`
   generated on the fly (Qdrant collection, field mapping, Oxigraph URL,
-  ontology id derived from the collection name).
+  ontology id derived from the collection name — see below).
+- **Several ontologies per collection** — the **ontology** selector at the top
+  of the page picks one of the collection's ontologies, or **+ new ontology**
+  to name another one. The default ontology's id is the sanitized collection
+  name (`sanitize_ontology_id`), a named one's `{default id}__{sanitized name}`
+  (`cogmaps.ontology.olaf_config.ontology_id_for`) — derived from the
+  collection, so it stays within the collection's ownership boundary. Each
+  ontology has its own Oxigraph graph (`urn:olaf:{id}`), semantic index,
+  chunk progress, cached `.ttl` (`user_data/ontology/<collection>.ttl` for the
+  default ontology, `<id>.ttl` for the others), reasoning backups and job
+  history: the seeds and domain-guidance mode a build defaults to come from
+  that ontology's last build. The domain blueprint and hand-written
+  guidelines stay per collection, shared by its ontologies. The list is the
+  collection's graphs in Oxigraph plus the ontologies of its jobs (a build
+  not exported yet).
 - **Semantic index** — OLAF embeds every class, individual and property it
   creates (into the `olaf_index_{id}` Qdrant collection), and every entity of
   a seed ontology (into `olaf_index_seed_{seed_id}`), for semantic search and
@@ -282,14 +296,17 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   dedup/reuse path — is a no-op, so a chunk that merely confirms an existing
   concept never gets recorded as an additional source), and `property_create`
   / `relation_add` have no provenance parameter at all.
-- **Chunk status in Qdrant** — OLAF tracks progress through an `olaf_status`
-  payload field on each chunk, but only writes it when a chunk is marked
-  processed, while `chunk_list(status="pending")` filters on that value. Before
-  every build, `cogmaps.ontology.runner.init_pending_chunks` therefore tags the
-  selected documents' never-processed chunks with `olaf_status="pending"`
-  (chunks already processed are left untouched). **A build does write to the
-  source Qdrant collection** — this payload field only, never the text or
-  vectors.
+- **Chunk status in Qdrant** — OLAF tracks each ontology's progress through
+  `olaf_status_{ontology_id}` / `olaf_processed_at_{ontology_id}` payload
+  fields on each chunk, written when a chunk is marked processed (a chunk
+  without them is pending), so the ontologies of a collection each go through
+  every chunk. **A build does write to the source Qdrant collection** — these
+  payload fields only, never the text or vectors. Ontologies built before
+  OLAF tracked progress per ontology used shared `olaf_status` /
+  `olaf_processed_at` fields: the first build after the upgrade
+  (`cogmaps.ontology.runner.migrate_shared_chunk_status`) marks those chunks
+  processed for the collection's default ontology — the only one that could
+  have written them — and removes the shared fields.
 - **When the agent stops** — the model saying it is done is not enough: the
   loop only ends once OLAF's `chunk_list` confirms no selected chunk is still
   pending. Otherwise the agent is nudged to continue, up to
@@ -335,7 +352,7 @@ ontology-CRUD tools) driven by a tool-calling LLM agent.
   (`SEED_TOOLS`) are added only when seeds are selected for the build.
 - **Seed ontologies** — the **seed ontologies to reuse** field selects, among
   the seeds loaded in Oxigraph, those the agent may reuse terms from (default:
-  the seeds of the collection's last build; stored in the job's
+  the seeds of the ontology's last build; stored in the job's
   `options["seed_ids"]`). Before the loop, the agent restricts its OLAF
   session to them (`seed_select` — also with none selected, since OLAF's
   default is every seed in the store; a seed deleted since is skipped with a
@@ -414,15 +431,16 @@ pairs declared, inferences materialized, and the problem counts of every check.
   extracting (`disjoint_add` in `cogmaps.ontology.prompts`), when the chunks
   at hand make it clear; the reasoning step reviews all sibling classes.
 - **Backups** — before its first change, a run saves the ontology graph as
-  Turtle under `user_data/ontology/backups/<collection>/<date>-<time>.ttl`.
+  Turtle under `user_data/ontology/backups/<collection>/<date>-<time>.ttl`
+  (`backups/<ontology id>/` for a collection's named ontologies).
   The **backups before reasoning** expander downloads one or restores it
   (an HTTP graph-store `PUT` replacing `urn:olaf:{ontology_id}` in Oxigraph).
   Restoring does not touch OLAF's semantic index (`olaf_index_{id}`).
   Every change is also logged with its full arguments. Backups are removed
   along with the ontology by `/manage/`.
 - **Concurrency** — builds and reasoning runs share the runner's single
-  worker, so they never write to the same graph at once; the launch button
-  is disabled while a job runs on the collection.
+  worker, so they never write to the same graph at once; the reasoning launch
+  button is disabled while a job runs on the ontology.
 
 #### Domain discovery (optional)
 
@@ -431,32 +449,45 @@ inferred domain, its epistemological nature (empirical, deontic,
 interdisciplinary…), and a list of *pillars* — taxonomical dimensions, each
 with a target OWL parent class, 8–12 candidate concepts and typical relations.
 
-- **Opt-in per build** — tick **use domain discovery** before launching a
-  build (unticked by default). Unticked, the default prompt is used and no
-  discovery call is made. Ticked, the collection's cached blueprint is used;
-  if there is none, one is synthesized at launch. If synthesis fails, the
-  build continues with the default prompt.
+- **Chosen per build** — the **🧬 Domain guidance** section of
+  `/build ontology/` offers three modes (default: the mode of the ontology's
+  last build, stored in the job's `options["domain_mode"]`):
+  - **none — default prompt**: the domain-neutral prompt, no discovery call;
+  - **LLM discovery**: the collection's cached blueprint is used; if there is
+    none, one is synthesized at launch. If synthesis fails, the build
+    continues with the default prompt;
+  - **written by hand**: guidelines you write, injected into the prompt as
+    is. Only saved text is used: with none saved, the build falls back to the
+    default prompt.
 - **Discovery** — `cogmaps.ontology.domain_discovery` samples one random
   chunk per document (up to 15 documents, 500 characters each) from Qdrant
   and asks a Scaleway model to synthesize the blueprint. The model is
   `DOMAIN_DISCOVERY_MODEL` (default `qwen3.8-27b`); `SCALEWAY_API_KEY`
   is required. Excerpts are random, so two discoveries on the same
   collection can differ.
-- **Editing** — the **🧬 Domain discovery** section of `/build ontology/` lets
-  you run discovery (**🔍 discover** / **↻ re-discover**), create a blueprint
-  by hand, and review or edit it through three tabs: *Overview*, *Form
-  Editor* (domain, pillars, add/remove pillars) and *Raw JSON*.
+- **Editing** — in **LLM discovery** mode, run discovery (**🔍 discover**,
+  then **↻ re-discover**, which asks for confirmation since it replaces the
+  text and your edits). The page shows the inferred domain and its nature,
+  when and from how many documents it was discovered (with a warning once the
+  collection's document count has changed), and the guidelines generated from
+  the pillars as markdown, editable freely: **💾 Save** stores the edited text
+  in the blueprint (`guidelines`), used instead of the generated one. In
+  **written by hand** mode, the editor starts from a template shaped like the
+  generated guidelines (`cogmaps.ontology.domain_discovery.save_manual_guidelines`).
 - **Storage** — blueprints are cached as one JSON file per collection under
-  `DOMAIN_PROFILES_DIR` (default `user_data/ontology/domain_profiles/`). A
-  collection's blueprint is removed along with its ontology or the collection
-  itself by the `/manage/` cleanup actions below.
+  `DOMAIN_PROFILES_DIR` (default `user_data/ontology/domain_profiles/`), the
+  hand-written guidelines next to them (`<default ontology id>.manual.md`), both
+  shared by the collection's ontologies. It is removed along with the
+  collection by the `/manage/` cleanup actions below — not when a single
+  ontology is deleted.
 
 ### Ontology Explorer (`/explore ontology/`)
 
 Read-only access to the ontologies already built, and loading of seed
-ontologies. The page lists the collections the user can see (same visibility
-rules as everywhere else) that have an ontology in Oxigraph
-(`urn:olaf:{ontology_id}`), with four tabs:
+ontologies. The **ontology** selector lists the ontologies in Oxigraph
+(`urn:olaf:{ontology_id}`) of the collections the user can see (same
+visibility rules as everywhere else) — labelled with the collection, plus
+the ontology's name for a named one (`collection — v2`) — with four tabs:
 
 - **❓ ask** — natural-language questions answered by a search agent
   (`cogmaps.ontology.search_agent`), ported from OLAF's
@@ -523,16 +554,20 @@ to the user's collections: a query naming another graph can read it.
 each running OLAF's own CLI drop commands as a short-lived subprocess
 (`cogmaps.ontology.olaf_cli`, same config-generation approach as a build job):
 
-- **Delete entire collection** cascades to delete that collection's ontology
-  too (Oxigraph graph and `olaf_index_{id}` Qdrant collection via
-  `olaf drop <id>`, a legacy `olaf_concepts_{id}` collection, the cached
-  `.ttl` export and the domain blueprint) — a warning
-  is shown before confirming. The blueprint is removed even when no ontology
-  was ever built for the collection. **This never goes the other way**: deleting an ontology alone
-  never touches the Qdrant collection it was built from.
-- **Delete ontology only** — the same cleanup, without touching the
-  collection. The domain blueprint goes too: export it from the *Raw JSON*
-  tab first if you want to rebuild with the same one.
+- **Delete entire collection** cascades to delete every ontology of that
+  collection (`delete_ontologies_for_collection`: for each, the cleanup of
+  *Delete ontology only* below) and its domain blueprint — a warning is shown
+  before confirming. The blueprint is removed even when no ontology was ever
+  built for the collection. The ontologies are those found in Oxigraph: if it
+  is down, they are left behind. **This never goes the other way**: deleting
+  an ontology alone never touches the Qdrant collection it was built from.
+- **Delete ontology only** — pick one of the collection's ontologies: its
+  Oxigraph graph, `olaf_index_{id}` Qdrant collection and chunk progress via
+  `olaf drop <id> --collection <collection>` (only its `olaf_status_{id}`
+  payload fields: an ontology rebuilt under the same name starts from every
+  chunk), a legacy `olaf_concepts_{id}` collection, the cached `.ttl` export
+  and the reasoning backups. The collection, its other ontologies and its
+  domain blueprint are untouched.
 - **Delete seed ontologies** (admin-only) — seeds are global, shared across
   every ontology in the store, so this section is independent of the
   collection selected above. Runs `olaf drop-seed <id>`, which also deletes

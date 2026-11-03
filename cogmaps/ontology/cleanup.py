@@ -1,5 +1,9 @@
 """Deletes an ontology (or a global seed) and everything OLAF/cog-maps derived from it.
 
+A collection can have several ontologies (see
+:func:`cogmaps.ontology.olaf_config.ontology_id_for`), deleted one by one or all
+at once.
+
 Used by the Manage page (``pages/7_Manage.py``):
   - deleting an ontology never touches the Qdrant collection it was built from,
   - but deleting a Qdrant collection *does* cascade to delete its ontology —
@@ -15,7 +19,7 @@ remove the Oxigraph graph and its semantic index (the ``olaf_index_{id}`` /
 ``olaf_index_seed_{id}`` Qdrant collection). The rest is cleaned up here
 directly: the ``olaf_concepts_{id}`` collection an ontology built by an older
 OLAF may still have, the locally cached Turtle export, the reasoning backups
-and the collection's cached domain blueprint (see
+and — when all of a collection's ontologies go — its cached domain blueprint (see
 :mod:`cogmaps.ontology.domain_discovery`).
 """
 from __future__ import annotations
@@ -29,7 +33,7 @@ from cogmaps.ontology.olaf_cli import run_olaf, scratch_config_dir
 from cogmaps.ontology.olaf_config import (
     LEGACY_CONCEPTS_PREFIX,
     backup_dir_for,
-    sanitize_ontology_id,
+    collection_ontology_ids,
     ttl_path_for,
 )
 from cogmaps.ontology.oxigraph_client import is_reachable, list_graphs
@@ -37,39 +41,42 @@ from cogmaps.ontology.seeds import SEED_GRAPH_PREFIX
 from cogmaps.qdrant.store import QdrantStore
 
 
-def ontology_exists_for(collection: str) -> bool:
-    """Whether an ontology graph currently exists in Oxigraph for this collection.
+def ontology_ids_for(collection: str) -> list[str]:
+    """The collection's ontologies currently in Oxigraph, the default one first.
 
-    Returns False (rather than raising) when Oxigraph is unreachable —
+    Returns an empty list (rather than raising) when Oxigraph is unreachable —
     ontology cleanup is a secondary concern on this page; a Qdrant-only
     Manage page must keep working when Oxigraph happens to be down.
     """
     url = cfg_oxigraph_url()
     if not is_reachable(url):
-        return False
-    graph_uri = f"urn:olaf:{sanitize_ontology_id(collection)}"
+        return []
     try:
-        return graph_uri in list_graphs(url)
+        return collection_ontology_ids(collection, list_graphs(url))
     except Exception:  # noqa: BLE001
-        return False
+        return []
 
 
-def delete_ontology_for_collection(collection: str, qdrant_host: str, qdrant_port: int) -> list[str]:
-    """Drop the Oxigraph ontology graph + its semantic index (and legacy concepts collection)
-    + cached .ttl export + reasoning backups + domain blueprint.
+def delete_ontology(collection: str, ontology_id: str, qdrant_host: str, qdrant_port: int) -> list[str]:
+    """Drop one of the collection's ontologies: its Oxigraph graph + semantic index (and legacy
+    concepts collection) + its chunk processing status + cached .ttl export + reasoning backups.
 
+    The collection's domain blueprint is shared by all its ontologies: left in place.
     Returns human-readable status lines for each step actually performed.
-    Raises ``RuntimeError`` if the ``olaf drop`` subprocess itself fails.
+    Raises ``RuntimeError`` if an ``olaf`` subprocess itself fails.
     """
-    ontology_id = sanitize_ontology_id(collection)
     messages: list[str] = []
 
     with scratch_config_dir(
         qdrant_url=f"http://{qdrant_host}:{qdrant_port}", qdrant_collection=collection,
         ontology_id=ontology_id, ontology_name=collection,
     ) as config_dir:
-        run_olaf(["drop", ontology_id], config_dir)
-        messages.append(f"Ontology graph 'urn:olaf:{ontology_id}' and its semantic index dropped.")
+        # --collection: also drops its progress through the chunks, so that an ontology
+        # built again under the same name starts from every chunk.
+        run_olaf(["drop", ontology_id, "--collection", collection], config_dir)
+        messages.append(
+            f"Ontology graph 'urn:olaf:{ontology_id}', its semantic index and its chunk processing status dropped."
+        )
 
     store = QdrantStore(qdrant_host, qdrant_port)
     legacy_collection = f"{LEGACY_CONCEPTS_PREFIX}_{ontology_id}"
@@ -77,19 +84,26 @@ def delete_ontology_for_collection(collection: str, qdrant_host: str, qdrant_por
         store.delete_collection(legacy_collection)
         messages.append(f"Legacy concepts collection '{legacy_collection}' deleted.")
 
-    ttl_file = ttl_path_for(collection)
+    ttl_file = ttl_path_for(collection, ontology_id)
     if os.path.exists(ttl_file):
         os.remove(ttl_file)
         messages.append("Cached Turtle export removed.")
 
-    backup_dir = backup_dir_for(collection)
+    backup_dir = backup_dir_for(collection, ontology_id)
     if backup_dir.is_dir():
         shutil.rmtree(backup_dir)
         messages.append("Reasoning backups removed.")
 
+    return messages
+
+
+def delete_ontologies_for_collection(collection: str, qdrant_host: str, qdrant_port: int) -> list[str]:
+    """Drop every ontology of the collection (see :func:`delete_ontology`) and its domain blueprint."""
+    messages: list[str] = []
+    for ontology_id in ontology_ids_for(collection):
+        messages += delete_ontology(collection, ontology_id, qdrant_host, qdrant_port)
     if delete_blueprint(collection):
         messages.append("Domain blueprint removed.")
-
     return messages
 
 
@@ -98,7 +112,7 @@ def list_seed_ids() -> list[str]:
 
     Seeds are shared across every ontology in the store — not scoped to any
     one Qdrant collection. Returns an empty list (rather than raising) when
-    Oxigraph is unreachable, same reasoning as :func:`ontology_exists_for`.
+    Oxigraph is unreachable, same reasoning as :func:`ontology_ids_for`.
     """
     url = cfg_oxigraph_url()
     if not is_reachable(url):

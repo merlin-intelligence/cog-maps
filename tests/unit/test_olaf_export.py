@@ -73,3 +73,26 @@ def test_export_oxigraph_unreachable_is_logged(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="cogmaps.ontology.olaf_config"):
         assert export_oxigraph_ontology_ttl("my_onto", "http://ox:7878") is None
     assert any("connection refused" in r.getMessage() for r in caplog.records)
+
+
+def test_ontology_ids_of_a_collection():
+    assert olaf_config.ontology_id_for("My-Col") == "my_col"
+    assert olaf_config.ontology_id_for("My-Col", "  ") == "my_col"
+    assert olaf_config.ontology_id_for("My-Col", "Legal v2") == "my_col__legal_v2"
+    assert olaf_config.ontology_name_of("My-Col", "my_col__legal_v2") == "legal_v2"
+    assert olaf_config.ontology_name_of("My-Col", "my_col") == ""
+    assert olaf_config.ontology_display_name("My-Col", "my_col__legal_v2") == "My-Col — legal_v2"
+    assert olaf_config.ontology_display_name("My-Col", "my_col") == "My-Col"
+    graphs = ["urn:olaf:my_col__b", "urn:olaf:my_col__a", "urn:olaf:my_col", "urn:olaf:my_col_x", "urn:olaf:seed:s"]
+    assert olaf_config.collection_ontology_ids("My-Col", graphs) == ["my_col", "my_col__a", "my_col__b"]
+    assert olaf_config.collection_ontology_ids("My-Col", ["urn:olaf:my_col__a"]) == ["my_col__a"]
+
+
+def test_default_ontology_keeps_its_local_files_named_after_the_collection(monkeypatch, tmp_path):
+    monkeypatch.setattr(olaf_config, "USER_DATA_DIR", tmp_path)
+    assert olaf_config.ttl_path_for("My-Col") == str(tmp_path / "ontology" / "My-Col.ttl")
+    assert olaf_config.ttl_path_for("My-Col", "my_col") == str(tmp_path / "ontology" / "My-Col.ttl")
+    assert olaf_config.ttl_path_for("My-Col", "my_col__v2") == str(tmp_path / "ontology" / "my_col__v2.ttl")
+    olaf_config.save_backup("My-Col", "my_col__v2", "<a> <b> <c> .")
+    assert olaf_config.list_backups("My-Col") == []
+    assert len(olaf_config.list_backups("My-Col", "my_col__v2")) == 1
