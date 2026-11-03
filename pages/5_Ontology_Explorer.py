@@ -14,7 +14,7 @@ from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, oxigraph_url
 from cogmaps.core.llm_impacts import record_llm_impacts
 from cogmaps.ontology.explorer_view import build_explorer_html
 from cogmaps.ontology.graph import build_pyvis_html, extract_subgraph
-from cogmaps.ontology.olaf_config import sanitize_ontology_id
+from cogmaps.ontology.olaf_config import collection_ontology_ids, ontology_name_of
 from cogmaps.ontology.oxigraph_client import (
     SparqlError,
     export_graph_ttl,
@@ -177,20 +177,21 @@ def _render_seeds() -> None:
 # Ontologies are listed through the collections this user can see, not every
 # named graph in Oxigraph — and only those that have been built (the search
 # agent's OLAF would otherwise bootstrap an empty ontology on startup).
-_with_ontology = [
-    (label, qname) for label, qname in list_visible_collections(store.list_collections())
-    if f"urn:olaf:{sanitize_ontology_id(qname)}" in graphs
-]
-if not _with_ontology:
+# One entry per ontology, labelled with its collection (and its name, but for
+# a collection's default ontology): {label: (qdrant collection, ontology id)}.
+_ontologies = {
+    f"{label} — {name}" if (name := ontology_name_of(qname, oid)) else label: (qname, oid)
+    for label, qname in list_visible_collections(store.list_collections())
+    for oid in collection_ontology_ids(qname, graphs)
+}
+if not _ontologies:
     empty_state("🧬", "No ontology found yet. Go to <strong>/build ontology/</strong> to build one first.")
     st.markdown("#### 🌱 seed ontologies")
     _render_seeds()
     st.stop()
 
-col_map = dict(_with_ontology)
-collection_name = st.selectbox("collection", list(col_map))
-qdrant_col = col_map[collection_name]
-ontology_id = sanitize_ontology_id(qdrant_col)
+ontology_label = st.selectbox("ontology", list(_ontologies))
+qdrant_col, ontology_id = _ontologies[ontology_label]
 graph_uri = f"urn:olaf:{ontology_id}"
 
 
@@ -356,7 +357,7 @@ with tab_browse:
             empty_state("🧬", "This ontology graph is empty.")
         else:
             try:
-                st.components.v1.html(build_explorer_html(ttl, title=collection_name), height=850)
+                st.components.v1.html(build_explorer_html(ttl, title=ontology_label), height=850)
             except Exception as e:  # noqa: BLE001
                 st.error(f"Could not render the graph view: {e}")
 

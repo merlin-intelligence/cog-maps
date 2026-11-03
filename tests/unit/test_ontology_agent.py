@@ -421,30 +421,29 @@ def test_run_build_skips_persisting_export_without_ontology_terms(monkeypatch):
     assert exported == []
 
 
-# ── init_pending_chunks ──────────────────────────────────────────────
+# ── migrate_shared_chunk_status ──────────────────────────────────────
 
-def test_init_pending_chunks_makes_fresh_chunks_visible_to_olaf_pending_filter():
+def test_migrate_shared_chunk_status_hands_processed_chunks_to_the_default_ontology():
     from qdrant_client import QdrantClient, models
 
-    from cogmaps.ontology.runner import OLAF_STATUS_FIELD, init_pending_chunks
+    from cogmaps.ontology.runner import migrate_shared_chunk_status
 
     client = QdrantClient(":memory:")
-    client.create_collection("col", vectors_config=models.VectorParams(size=2, distance=models.Distance.COSINE))
-    client.upsert("col", [
-        models.PointStruct(id=1, vector=[1, 0], payload={"filename": "a.pdf"}),
-        models.PointStruct(id=2, vector=[1, 0], payload={"filename": "a.pdf", OLAF_STATUS_FIELD: "processed"}),
+    client.create_collection("My-Col", vectors_config=models.VectorParams(size=2, distance=models.Distance.COSINE))
+    client.upsert("My-Col", [
+        models.PointStruct(id=1, vector=[1, 0], payload={"filename": "a.pdf", "olaf_status": "processed",
+                                                         "olaf_processed_at": "2026-01-01"}),
+        models.PointStruct(id=2, vector=[1, 0], payload={"filename": "a.pdf", "olaf_status": "pending"}),
         models.PointStruct(id=3, vector=[1, 0], payload={"filename": "b.pdf"}),
     ])
-    # Same filter OLAF's chunk_list(status="pending") uses
-    pending = models.Filter(must=[models.FieldCondition(key=OLAF_STATUS_FIELD, match=models.MatchValue(value="pending"))])
-    assert client.scroll("col", scroll_filter=pending)[0] == []
 
-    init_pending_chunks(client, "col", ["a.pdf"])
+    assert migrate_shared_chunk_status(client, "My-Col") == 1
 
-    assert [p.id for p in client.scroll("col", scroll_filter=pending)[0]] == [1]
-    by_id = {p.id: p.payload for p in client.retrieve("col", [1, 2, 3])}
-    assert by_id[2][OLAF_STATUS_FIELD] == "processed"  # already-processed chunk untouched
-    assert OLAF_STATUS_FIELD not in by_id[3]  # unselected document untouched
+    by_id = {p.id: p.payload for p in client.retrieve("My-Col", [1, 2, 3])}
+    assert by_id[1] == {"filename": "a.pdf", "olaf_status_my_col": "processed"}
+    assert by_id[2] == {"filename": "a.pdf"}  # a pending chunk is pending for every ontology
+    assert by_id[3] == {"filename": "b.pdf"}
+    assert migrate_shared_chunk_status(client, "My-Col") == 0  # nothing left to hand over
 
 
 def test_run_build_hides_and_refuses_check_tools(monkeypatch):

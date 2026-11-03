@@ -75,13 +75,14 @@ p, li, label, [data-testid="stMarkdownContainer"] p {
 }
 
 [data-testid="stRadio"] > div { gap: 0.5rem !important; }
-[data-testid="stRadio"] label {
+/* Options only: the widget's own label (e.g. "ontology") stays plain, like other widgets'. */
+[data-testid="stRadio"] [role="radiogroup"] label {
     background: var(--bg-card) !important; border: 1px solid var(--border) !important;
     border-radius: var(--radius) !important; padding: 0.4rem 1rem !important;
     font-family: var(--font-mono) !important; font-size: 0.78rem !important;
     color: var(--text-muted) !important; cursor: pointer !important; transition: all 0.15s !important;
 }
-[data-testid="stRadio"] label:has(input:checked) {
+[data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) {
     border-color: var(--rust) !important; color: var(--rust) !important; background: var(--rust-pale) !important;
 }
 

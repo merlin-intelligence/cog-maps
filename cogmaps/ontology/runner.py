@@ -31,8 +31,12 @@ from cogmaps.ontology.domain_discovery import (
 from cogmaps.ontology.mcp_client import olaf_session
 from cogmaps.ontology.olaf_cli import write_config
 from cogmaps.ontology.olaf_config import (
+    SHARED_STATUS_FIELDS,
+    chunk_status_field,
     export_oxigraph_ontology_ttl,
     has_ontology_content,
+    ontology_display_name,
+    sanitize_ontology_id,
     save_backup,
     ttl_path_for,
 )
@@ -44,27 +48,41 @@ from cogmaps.qdrant.store import QdrantStore
 __all__ = ["OntologyJobRunner", "build_domain_mode", "build_seed_ids", "final_export", "ttl_path_for"]
 
 
-# OLAF's chunk-status payload field (``olaf.chunks._STATUS_FIELD``).
-OLAF_STATUS_FIELD = "olaf_status"
+def migrate_shared_chunk_status(client, collection: str) -> int:
+    """Hand the collection's shared chunk status over to its default ontology.
 
-
-def init_pending_chunks(client, collection: str, doc_filenames: list[str]) -> None:
-    """Tag the requested documents' never-processed chunks as ``olaf_status="pending"``.
-
-    OLAF only writes this field when a chunk is marked processed, but its
-    ``chunk_list(status="pending")`` filters on the field's value — so on a
-    fresh collection it returns nothing and the agent believes there is no
-    work left. Chunks already marked processed are left untouched.
+    Ontologies built before collections had several were tracked with OLAF's
+    shared ``olaf_status`` field, which only the default ontology can have
+    written. Its processed chunks are marked processed for it under its own
+    per-ontology field, then the shared fields are removed — so the next
+    build of any of the collection's ontologies sees the right progress, and
+    this runs once. Returns the number of chunks handed over.
     """
-    must: list = [models.IsEmptyCondition(is_empty=models.PayloadField(key=OLAF_STATUS_FIELD))]
-    if doc_filenames:
-        must.append(models.FieldCondition(key="filename", match=models.MatchAny(any=list(doc_filenames))))
-    client.set_payload(
+    status_field = SHARED_STATUS_FIELDS[0]
+    with_status = models.Filter(must_not=[
+        models.IsEmptyCondition(is_empty=models.PayloadField(key=status_field)),
+    ])
+    if not client.count(collection_name=collection, count_filter=with_status).count:
+        return 0
+    processed = models.Filter(must=[
+        models.FieldCondition(key=status_field, match=models.MatchValue(value="processed")),
+    ])
+    count = client.count(collection_name=collection, count_filter=processed).count
+    if count:
+        client.set_payload(
+            collection_name=collection,
+            payload={chunk_status_field(sanitize_ontology_id(collection)): "processed"},
+            points=models.FilterSelector(filter=processed),
+            wait=True,
+        )
+    # Also drops the "pending" values cog-maps wrote for older OLAF versions.
+    client.delete_payload(
         collection_name=collection,
-        payload={OLAF_STATUS_FIELD: "pending"},
-        points=models.FilterSelector(filter=models.Filter(must=must)),
+        keys=list(SHARED_STATUS_FIELDS),
+        points=models.FilterSelector(filter=with_status),
         wait=True,
     )
+    return count
 
 
 async def final_export(
@@ -101,15 +119,15 @@ def job_domain_mode(job: dict) -> str:
     return job["options"].get("domain_mode") or ("llm" if job["use_domain_discovery"] else "none")
 
 
-def build_domain_mode(store: OntologyJobStore, collection: str) -> str:
-    """The domain guidance mode of the collection's latest build ("none" if never built)."""
-    job = store.latest_job_for(collection, "build")
+def build_domain_mode(store: OntologyJobStore, collection: str, ontology_id: str) -> str:
+    """The domain guidance mode of the ontology's latest build ("none" if never built)."""
+    job = store.latest_job_for(collection, "build", ontology_id)
     return job_domain_mode(job) if job else "none"
 
 
-def build_seed_ids(store: OntologyJobStore, collection: str) -> list[str]:
-    """The seeds selected for the collection's latest build — those its ontology reuses terms from."""
-    job = store.latest_job_for(collection, "build")
+def build_seed_ids(store: OntologyJobStore, collection: str, ontology_id: str) -> list[str]:
+    """The seeds selected for the ontology's latest build — those it reuses terms from."""
+    job = store.latest_job_for(collection, "build", ontology_id)
     return job["options"].get("seed_ids", []) if job else []
 
 
@@ -169,7 +187,7 @@ class OntologyJobRunner:
         config_dir = tempfile.mkdtemp(prefix=f"cogmaps_olaf_{job_id}_")
         try:
             self._write_config(config_dir, job)
-            export_cb = _ttl_writer(collection)
+            export_cb = _ttl_writer(collection, job["ontology_id"])
 
             # ── Domain guidance (optional, chosen per job) ──
             blueprint = None
@@ -204,7 +222,9 @@ class OntologyJobRunner:
                 log("No domain guidance for this build — using the default prompt.")
 
             qdrant = QdrantStore(self.qdrant_host, self.qdrant_port).client
-            init_pending_chunks(qdrant, collection, job["doc_filenames"])
+            if migrated := migrate_shared_chunk_status(qdrant, collection):
+                log(f"{migrated} chunk(s) processed by the collection's default ontology before chunk status "
+                    "was tracked per ontology: now marked processed for it only.")
             ensure_ontology_index(job["ontology_id"], config_dir, qdrant, log)
 
             log(f"Starting OLAF (collection={collection!r}, ontology_id={job['ontology_id']!r})")
@@ -237,7 +257,7 @@ class OntologyJobRunner:
             self._write_config(config_dir, job)
 
             def backup_cb(turtle: str) -> None:
-                log(f"Backup of the ontology before any change: {save_backup(collection, turtle)}")
+                log(f"Backup of the ontology before any change: {save_backup(collection, job['ontology_id'], turtle)}")
 
             ensure_ontology_index(
                 job["ontology_id"], config_dir, QdrantStore(self.qdrant_host, self.qdrant_port).client, log,
@@ -252,14 +272,14 @@ class OntologyJobRunner:
                     log=log,
                     set_progress=set_progress,
                     backup_cb=backup_cb,
-                    export_cb=_ttl_writer(collection),
+                    export_cb=_ttl_writer(collection, job["ontology_id"]),
                     max_rounds=options.get("max_rounds", 3),
                     fix_orphans=options.get("fix_orphans", True),
                     dedup=options.get("dedup", True),
                     enrich_disjointness=options.get("enrich_disjointness", True),
                     infer=options.get("infer", True),
                     review_inferences=options.get("review_inferences", True),
-                    seed_ids=build_seed_ids(self.store, collection),
+                    seed_ids=build_seed_ids(self.store, collection, job["ontology_id"]),
                 )
             self.store.set_result(job_id, summary)
             self.store.set_status(job_id, "done")
@@ -276,14 +296,14 @@ class OntologyJobRunner:
             qdrant_url=f"http://{self.qdrant_host}:{self.qdrant_port}",
             qdrant_collection=job["collection"],
             ontology_id=job["ontology_id"],
-            ontology_name=job["collection"],
+            ontology_name=ontology_display_name(job["collection"], job["ontology_id"]),
         )
 
 
-def _ttl_writer(collection: str) -> Callable[[str], None]:
-    """Callback persisting an exported Turtle to the collection's on-disk fallback copy."""
+def _ttl_writer(collection: str, ontology_id: str) -> Callable[[str], None]:
+    """Callback persisting an exported Turtle to the ontology's on-disk fallback copy."""
     def export_cb(turtle: str) -> None:
-        out_path = ttl_path_for(collection)
+        out_path = ttl_path_for(collection, ontology_id)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(turtle)

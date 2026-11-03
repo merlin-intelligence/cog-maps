@@ -198,3 +198,17 @@ def test_latest_job_for_can_filter_by_job_type(tmp_path):
     assert store.latest_job_for("col", "reasoning")["id"] == "r1"
     assert store.latest_job_for("col", "build")["id"] == "b1"
     assert store.latest_job_for("other", "reasoning") is None
+
+
+def test_latest_job_for_can_filter_by_ontology_and_lists_the_collection_ontologies(tmp_path):
+    store = _store(tmp_path)
+    for job_id, ontology_id in (("a1", "col"), ("b1", "col__v2"), ("a2", "col")):
+        store.create_job(
+            job_id=job_id, collection="col", ontology_id=ontology_id, doc_filenames=[],
+            llm_provider="scaleway", llm_model="m",
+        )
+    assert store.latest_job_for("col", ontology_id="col__v2")["id"] == "b1"
+    assert store.latest_job_for("col", "build", "col")["id"] == "a2"
+    assert store.latest_job_for("col", ontology_id="col__v3") is None
+    assert store.ontology_ids_for("col") == ["col", "col__v2"]
+    assert store.ontology_ids_for("other") == []

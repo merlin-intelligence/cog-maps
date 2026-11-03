@@ -185,10 +185,15 @@ class OntologyJobStore:
             ).fetchall()
             return [(r["rowid"], r["message"]) for r in rows]
 
-    def latest_job_for(self, collection: str, job_type: str | None = None) -> dict | None:
-        """The collection's most recent job — of ``job_type`` only, when given."""
+    def latest_job_for(
+        self, collection: str, job_type: str | None = None, ontology_id: str | None = None,
+    ) -> dict | None:
+        """The collection's most recent job — of ``job_type`` only, on ``ontology_id`` only, when given."""
         query = "SELECT * FROM ontology_jobs WHERE collection=?"
         params: tuple = (collection,)
+        if ontology_id:
+            query += " AND ontology_id=?"
+            params += (ontology_id,)
         if job_type:
             query += " AND job_type=?"
             params += (job_type,)
@@ -197,3 +202,13 @@ class OntologyJobStore:
             if not row:
                 return None
             return _job_from_row(row)
+
+    def ontology_ids_for(self, collection: str) -> list[str]:
+        """The ontologies jobs were launched on for the collection, oldest first."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT ontology_id FROM ontology_jobs WHERE collection=? "
+                "GROUP BY ontology_id ORDER BY MIN(created_at)",
+                (collection,),
+            ).fetchall()
+            return [r["ontology_id"] for r in rows]

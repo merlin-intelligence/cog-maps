@@ -38,6 +38,19 @@ INDEX_PREFIX = "olaf_index"
 # replaced on their next job (see cogmaps.ontology.seeds.ensure_ontology_index).
 LEGACY_CONCEPTS_PREFIX = "olaf_concepts"
 
+# Separates a collection's default ontology id from the name of its other ontologies.
+ONTOLOGY_NAME_SEP = "__"
+
+# OLAF's former chunk processing status fields, shared by every ontology of a
+# collection. OLAF now suffixes them with the ontology id (each ontology of a
+# collection has its own progress); ontologies built before still have these.
+SHARED_STATUS_FIELDS = ("olaf_status", "olaf_processed_at")
+
+
+def chunk_status_field(ontology_id: str) -> str:
+    """OLAF's per-ontology status payload field (ontology ids need no escaping)."""
+    return f"{SHARED_STATUS_FIELDS[0]}_{ontology_id}"
+
 
 def index_collection_for(ontology_id: str) -> str:
     """The Qdrant collection holding the semantic index of an ontology."""
@@ -60,33 +73,76 @@ def sanitize_ontology_id(collection: str) -> str:
     return slug or "main"
 
 
-def ttl_path_for(collection: str) -> str:
-    """Where the exported Turtle for a Qdrant collection's ontology is persisted.
+def ontology_id_for(collection: str, name: str = "") -> str:
+    """The ``ontology_id`` of one of a collection's ontologies.
+
+    A collection can have several: its default one (``name`` empty), whose id is
+    the sanitized collection name, and named ones, ``{default id}__{sanitized name}``
+    — derived from the collection, so they stay within its ownership boundary.
+    """
+    default = sanitize_ontology_id(collection)
+    slug = _ONTOLOGY_ID_RE.sub("_", name.lower()).strip("_")
+    return f"{default}{ONTOLOGY_NAME_SEP}{slug}" if slug else default
+
+
+def ontology_name_of(collection: str, ontology_id: str) -> str:
+    """The name part of one of the collection's ontology ids ("" for the default ontology)."""
+    prefix = sanitize_ontology_id(collection) + ONTOLOGY_NAME_SEP
+    return ontology_id[len(prefix):] if ontology_id.startswith(prefix) else ""
+
+
+def ontology_display_name(collection: str, ontology_id: str) -> str:
+    """The ``name`` OLAF records for the ontology: the collection for its default one
+    (as before collections had several), else the collection and the ontology's name."""
+    name = ontology_name_of(collection, ontology_id)
+    return f"{collection} — {name}" if name else collection
+
+
+def collection_ontology_ids(collection: str, graphs) -> list[str]:
+    """The collection's ontologies among the named graphs ``graphs`` (``urn:olaf:{id}``),
+    the default one first, then the named ones by name."""
+    default = sanitize_ontology_id(collection)
+    ids = {g[len("urn:olaf:"):] for g in graphs if g.startswith("urn:olaf:")}
+    named = sorted(i for i in ids if i.startswith(default + ONTOLOGY_NAME_SEP))
+    return ([default] if default in ids else []) + named
+
+
+def _local_name(collection: str, ontology_id: str | None) -> str:
+    """The name of an ontology's local files: the collection's for its default ontology
+    (as before collections had several), the ontology id for the others."""
+    if ontology_id is None or ontology_id == sanitize_ontology_id(collection):
+        return collection
+    return ontology_id
+
+
+def ttl_path_for(collection: str, ontology_id: str | None = None) -> str:
+    """Where the exported Turtle of a collection's ontology (its default one when
+    ``ontology_id`` is None) is persisted.
 
     Keyed by the (already user/public-namespaced) Qdrant collection name, not
     a separate user field — matching how the rest of the app treats the
     collection name as the ownership boundary.
     """
-    return str(USER_DATA_DIR / "ontology" / f"{collection}.ttl")
+    return str(USER_DATA_DIR / "ontology" / f"{_local_name(collection, ontology_id)}.ttl")
 
 
-def backup_dir_for(collection: str) -> Path:
+def backup_dir_for(collection: str, ontology_id: str | None = None) -> Path:
     """Where the reasoning agent's pre-change Turtle backups of a collection's ontology go."""
-    return USER_DATA_DIR / "ontology" / "backups" / collection
+    return USER_DATA_DIR / "ontology" / "backups" / _local_name(collection, ontology_id)
 
 
-def save_backup(collection: str, ttl: str) -> Path:
+def save_backup(collection: str, ontology_id: str | None, ttl: str) -> Path:
     """Write ``ttl`` as a new timestamped backup of the collection's ontology."""
-    directory = backup_dir_for(collection)
+    directory = backup_dir_for(collection, ontology_id)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{time.strftime('%Y%m%d-%H%M%S')}.ttl"
     path.write_text(ttl, encoding="utf-8")
     return path
 
 
-def list_backups(collection: str) -> list[Path]:
-    """The collection's ontology backups, most recent first."""
-    directory = backup_dir_for(collection)
+def list_backups(collection: str, ontology_id: str | None = None) -> list[Path]:
+    """The ontology's backups, most recent first."""
+    directory = backup_dir_for(collection, ontology_id)
     return sorted(directory.glob("*.ttl"), reverse=True) if directory.is_dir() else []
 
 

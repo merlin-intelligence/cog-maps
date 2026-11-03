@@ -8,13 +8,14 @@ import pandas as pd
 import streamlit as st
 
 from cogmaps.ontology.cleanup import (
-    delete_ontology_for_collection,
+    delete_ontologies_for_collection,
+    delete_ontology,
     delete_seed,
     list_seed_ids,
-    ontology_exists_for,
+    ontology_ids_for,
 )
 from cogmaps.ontology.domain_discovery import delete_blueprint
-from cogmaps.ontology.olaf_config import sanitize_ontology_id
+from cogmaps.ontology.olaf_config import ontology_name_of
 from cogmaps.ui.auth import (
     check_password,
     is_admin,
@@ -55,8 +56,7 @@ qdrant_col = col_map[collection_name]
 _is_public = collection_name.startswith("[public] ")
 _can_modify = is_admin() if _is_public else owns_collection(qdrant_col)
 
-_ontology_id = sanitize_ontology_id(qdrant_col)
-_ontology_exists = ontology_exists_for(qdrant_col)
+_ontology_ids = ontology_ids_for(qdrant_col)
 
 with st.expander("⚠ danger zone — delete entire collection"):
     if not _can_modify:
@@ -73,13 +73,13 @@ with st.expander("⚠ danger zone — delete entire collection"):
                 f'and all its {pt_count:,} vectors.</p>',
                 unsafe_allow_html=True,
             )
-        # Deleting a collection cascades to its ontology — an ontology is
+        # Deleting a collection cascades to its ontologies — an ontology is
         # meaningless without the source chunks it was extracted from. The
         # reverse is never true: deleting an ontology (below) never touches
         # the collection it was built from.
         st.warning(
-            "⚠ Deleting this collection will also permanently delete the ontology "
-            "built for it in Oxigraph (if any), including its semantic index, "
+            "⚠ Deleting this collection will also permanently delete the ontologies "
+            "built for it in Oxigraph (if any), including their semantic index, "
             "cached Turtle export and domain blueprint. This does not go the other way: deleting an ontology "
             "never deletes the collection."
         )
@@ -87,16 +87,17 @@ with st.expander("⚠ danger zone — delete entire collection"):
         # carry over a stale "confirmed" checkbox state to a different one.
         if st.checkbox(
             f"I confirm permanent deletion of '{collection_name}'"
-            + (" and its ontology" if _ontology_exists else ""),
+            + (f" and its {len(_ontology_ids)} ontolog{'y' if len(_ontology_ids) == 1 else 'ies'}"
+               if _ontology_ids else ""),
             key=f"confirm_del_col_{qdrant_col}",
         ):
             if st.button("delete collection now", type="primary"):
-                if _ontology_exists:
+                if _ontology_ids:
                     try:
-                        for msg in delete_ontology_for_collection(qdrant_col, sb.qdrant_host, sb.qdrant_port):
+                        for msg in delete_ontologies_for_collection(qdrant_col, sb.qdrant_host, sb.qdrant_port):
                             st.caption(f"✓ {msg}")
                     except Exception as e:  # noqa: BLE001
-                        st.warning(f"Could not fully delete the associated ontology: {e}")
+                        st.warning(f"Could not fully delete the associated ontologies: {e}")
                 # A blueprint can exist without any ontology (discovery run, no build yet).
                 try:
                     if delete_blueprint(qdrant_col):
@@ -116,23 +117,30 @@ with st.expander("⚠ danger zone — delete ontology only"):
             "You do not have permission to delete this ontology. "
             + ("Only admins can delete ontologies built on public collections." if _is_public else "")
         )
-    elif not _ontology_exists:
+    elif not _ontology_ids:
         st.caption(f"No ontology has been built for '{collection_name}' yet.")
     else:
+        _ontology_id = st.radio(
+            "ontology", _ontology_ids, format_func=lambda oid: ontology_name_of(qdrant_col, oid) or "default",
+            horizontal=True, key=f"del_onto_choice_{qdrant_col}",
+        )
+        _ontology_label = ontology_name_of(qdrant_col, _ontology_id) or "default"
         st.markdown(
             f'<p style="font-family:\'DM Mono\',monospace;font-size:0.78rem;color:#a82020">'
-            f'This will permanently delete the ontology for <strong>{html.escape(collection_name)}</strong> '
+            f'This will permanently delete the ontology <strong>{html.escape(_ontology_label)}</strong> of '
+            f'<strong>{html.escape(collection_name)}</strong> '
             f'(named graph <code>urn:olaf:{_ontology_id}</code>) from Oxigraph, its semantic index, '
-            f'the cached Turtle export and the domain blueprint. <strong>The Qdrant collection itself is never affected.</strong></p>',
+            f'its progress through the chunks and the cached Turtle export. The domain blueprint, shared by the '
+            f'collection\'s ontologies, is kept. <strong>The Qdrant collection itself is never affected.</strong></p>',
             unsafe_allow_html=True,
         )
         if st.checkbox(
-            f"I confirm permanent deletion of the ontology for '{collection_name}'",
-            key=f"confirm_del_onto_{qdrant_col}",
+            f"I confirm permanent deletion of the ontology '{_ontology_label}' of '{collection_name}'",
+            key=f"confirm_del_onto_{_ontology_id}",
         ):
-            if st.button("delete ontology now", type="primary", key=f"del_onto_btn_{qdrant_col}"):
+            if st.button("delete ontology now", type="primary", key=f"del_onto_btn_{_ontology_id}"):
                 try:
-                    for msg in delete_ontology_for_collection(qdrant_col, sb.qdrant_host, sb.qdrant_port):
+                    for msg in delete_ontology(qdrant_col, _ontology_id, sb.qdrant_host, sb.qdrant_port):
                         st.caption(f"✓ {msg}")
                     st.success("Ontology deleted.")
                     st.rerun()

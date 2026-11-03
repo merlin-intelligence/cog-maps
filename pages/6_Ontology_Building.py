@@ -15,11 +15,14 @@ from cogmaps.ontology.domain_discovery import (
     save_blueprint,
     save_manual_guidelines,
 )
+from cogmaps.ontology.cleanup import ontology_ids_for
 from cogmaps.ontology.graph import build_pyvis_html
 from cogmaps.ontology.olaf_config import (
     export_oxigraph_ontology_ttl,
     has_ontology_content,
     list_backups,
+    ontology_id_for,
+    ontology_name_of,
     restore_oxigraph_graph,
     sanitize_ontology_id,
     ttl_path_for,
@@ -63,6 +66,12 @@ def _oxigraph_ttl(ontology_id: str, url: str) -> str | None:
     return ttl if has_ontology_content(ttl) else None
 
 
+@st.cache_data(ttl=15, show_spinner=False)
+def _oxigraph_ontology_ids(collection: str) -> list[str]:
+    """The collection's ontologies in Oxigraph, cached like :func:`_oxigraph_ttl`."""
+    return ontology_ids_for(collection)
+
+
 def _show_results() -> None:
     """Refetch the ontology and rerun the whole page.
 
@@ -70,6 +79,7 @@ def _show_results() -> None:
     redraw the fragment — not the results section below it.
     """
     _oxigraph_ttl.clear()
+    _oxigraph_ontology_ids.clear()
     st.rerun(scope="app")
 
 
@@ -104,8 +114,44 @@ col_map = dict(_editable)
 
 collection_name = st.selectbox("collection", col_labels)
 qdrant_col = col_map[collection_name]
-ontology_id = sanitize_ontology_id(qdrant_col)
-st.caption(f"ontology id: `{ontology_id}` — repeated builds on this collection extend the same ontology")
+# A collection can have several ontologies: its default one, and others named here.
+_default_ontology_id = sanitize_ontology_id(qdrant_col)
+_NEW_ONTOLOGY = "+ new ontology"
+_ontology_key = f"ontology_{qdrant_col}"
+_ontology_ids = list(dict.fromkeys([
+    _default_ontology_id,
+    *_oxigraph_ontology_ids(qdrant_col),
+    # also those of builds not exported yet (running, or failed before their first concept)
+    *_ontology_job_store().ontology_ids_for(qdrant_col),
+]))
+# Set by a build launch (once the selectbox is drawn, its value can't change in that run).
+if _launched := st.session_state.pop(f"{_ontology_key}_next", None):
+    st.session_state[_ontology_key] = _launched
+# A radio, not a selectbox: a selectbox's search box reads as a place to type a name.
+_ontology_choice = st.radio(
+    "ontology",
+    [*_ontology_ids, _NEW_ONTOLOGY],
+    format_func=lambda oid: oid if oid == _NEW_ONTOLOGY else (ontology_name_of(qdrant_col, oid) or "default"),
+    horizontal=True,
+    key=_ontology_key,
+    help="Each ontology of the collection is built separately — its own graph, and its own progress "
+         "through the chunks. Create a new one to build another version from the same documents.",
+)
+if _ontology_choice == _NEW_ONTOLOGY:
+    _new_name = st.text_input(
+        "new ontology name", placeholder="e.g. v2, legal…", key=f"new_ontology_name_{qdrant_col}",
+        help="Letters and digits; other characters become '_'.",
+    )
+    ontology_id = ontology_id_for(qdrant_col, _new_name)
+    if ontology_id == _default_ontology_id:
+        st.info("Name the new ontology to build it.")
+        st.stop()
+    if ontology_id in _ontology_ids:
+        st.warning(f"The collection already has an ontology named “{ontology_name_of(qdrant_col, ontology_id)}”: "
+                   "a build will extend it.")
+else:
+    ontology_id = _ontology_choice
+st.caption(f"ontology id: `{ontology_id}` — repeated builds on this ontology extend it")
 
 filenames = sorted(store.existing_filenames(qdrant_col))
 
@@ -192,9 +238,9 @@ def _job_to_show(job_type: str) -> str | None:
     job_id = st.session_state.get(_active_job_key(job_type))
     if job_id:
         job = _ontology_job_store().get_job(job_id)
-        if job and job["collection"] == qdrant_col:
+        if job and job["collection"] == qdrant_col and job["ontology_id"] == ontology_id:
             return job_id
-    latest = _ontology_job_store().latest_job_for(qdrant_col, job_type)
+    latest = _ontology_job_store().latest_job_for(qdrant_col, job_type, ontology_id)
     return latest["id"] if latest else None
 
 
@@ -324,13 +370,13 @@ with st.container(border=True):
     domain_mode = st.radio(
         "domain guidance",
         list(_DOMAIN_MODES),
-        index=list(_DOMAIN_MODES).index(build_domain_mode(_ontology_job_store(), qdrant_col)),
+        index=list(_DOMAIN_MODES).index(build_domain_mode(_ontology_job_store(), qdrant_col, ontology_id)),
         format_func=_DOMAIN_MODES.get,
         horizontal=True,
         label_visibility="collapsed",
-        key=f"domain_mode_{qdrant_col}",
+        key=f"domain_mode_{ontology_id}",
         help="Optional text added to the agent's prompt to tailor it to this corpus. "
-             "Defaults to the choice of this collection's last build.",
+             "Defaults to the choice of this ontology's last build.",
     )
 
     if domain_mode == "none":
@@ -419,14 +465,14 @@ else:
         available_seeds = []
         st.warning(f"Could not list the seed ontologies: {e}")
     if available_seeds:
-        last_seeds = build_seed_ids(_ontology_job_store(), qdrant_col)
+        last_seeds = build_seed_ids(_ontology_job_store(), qdrant_col, ontology_id)
         selected_seeds = st.multiselect(
             "seed ontologies to reuse",
             available_seeds,
             default=[s for s in last_seeds if s in available_seeds],
             help="Reference ontologies the agent searches and reuses terms from (classes, properties, "
                  "individuals), under their own URIs — new classes become subclasses of seed classes where "
-                 "that is true. Defaults to the seeds of this collection's last build. "
+                 "that is true. Defaults to the seeds of this ontology's last build. "
                  "Load seeds from /explore ontology/.",
         )
     else:
@@ -452,6 +498,8 @@ else:
             )
             _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
             _activate_job(job_id, "build")
+            # A new ontology is now one of the collection's: select it.
+            st.session_state[f"{_ontology_key}_next"] = ontology_id
             st.rerun()
 
 _render_job_status("build")
@@ -460,7 +508,7 @@ st.markdown("---")
 
 # ── Results: raw Turtle + navigable graph ───────────────────────────────
 
-ttl_file = ttl_path_for(qdrant_col)
+ttl_file = ttl_path_for(qdrant_col, ontology_id)
 
 # Oxigraph is the source of truth; the on-disk .ttl (written by the build
 # runner) is only a fallback when Oxigraph is unreachable.
@@ -519,18 +567,18 @@ def _render_reasoning() -> None:
                      "axiom, which it fixes before anything is written. Unticked, inferences are written as is.",
             )
 
-        reasoning_seeds = build_seed_ids(_ontology_job_store(), qdrant_col)
+        reasoning_seeds = build_seed_ids(_ontology_job_store(), qdrant_col, ontology_id)
         st.caption(
             f"seeds (from the last build): {', '.join(reasoning_seeds)}" if reasoning_seeds
             else "seeds: none (the last build used no seed ontology)"
         )
 
-        latest = _ontology_job_store().latest_job_for(qdrant_col)
+        latest = _ontology_job_store().latest_job_for(qdrant_col, ontology_id=ontology_id)
         busy = latest is not None and latest["status"] in ("running", "pending")
         if not sb.scaleway_api_key:
             st.warning("Set SCALEWAY_API_KEY to run the reasoning agent (Scaleway tool-calling only).")
         elif st.button("▶ launch reasoning", type="primary", disabled=busy,
-                       help="A job is already running for this collection." if busy else None):
+                       help="A job is already running for this ontology." if busy else None):
             job_id = str(uuid.uuid4())
             _ontology_job_store().create_job(
                 job_id=job_id,
@@ -551,7 +599,7 @@ def _render_reasoning() -> None:
 
         _render_job_status("reasoning")
 
-        backups = list_backups(qdrant_col)
+        backups = list_backups(qdrant_col, ontology_id)
         if backups:
             with st.expander(f"backups before reasoning ({len(backups)})"):
                 labels = {
@@ -613,7 +661,7 @@ if ttl:
         except Exception as e:  # noqa: BLE001
             st.error(f"Could not render the graph view: {e}")
 else:
-    empty_state("🧬", "No ontology built yet for this collection — launch a build above.")
+    empty_state("🧬", "This ontology isn't built yet — launch a build above.")
 
 
 # ── LLM impacts footer ────────────────────────────────────────────────

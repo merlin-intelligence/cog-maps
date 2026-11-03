@@ -30,7 +30,7 @@ from cogmaps.config import oxigraph_url, qdrant_api_key
 from cogmaps.core.llm_impacts import INTERACTIVE_RETRY, acompletion_with_retry
 from cogmaps.ontology.agent import compact_history, mcp_tools_to_litellm, summarise_args
 from cogmaps.ontology.mcp_client import olaf_session
-from cogmaps.ontology.olaf_config import build_config_toml
+from cogmaps.ontology.olaf_config import build_config_toml, ontology_display_name
 from cogmaps.ontology.search_prompts import WRAP_UP_PROMPT, build_system_prompt
 from cogmaps.ontology.seeds import ensure_ontology_index
 from cogmaps.rag.llm_clients import strip_reasoning
@@ -310,7 +310,7 @@ async def ask_collection(
                 qdrant_api_key=qdrant_api_key(),
                 oxigraph_url=oxigraph_url(),
                 ontology_id=conversation.ontology_id,
-                ontology_name=collection,
+                ontology_name=ontology_display_name(collection, conversation.ontology_id),
             ))
         ensure_ontology_index(
             conversation.ontology_id, config_dir, QdrantClient(url=qdrant_url, api_key=qdrant_api_key()), log,
