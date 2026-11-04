@@ -22,7 +22,7 @@ from cogmaps.ui.auth import (
     list_visible_collections,
     owns_collection,
 )
-from cogmaps.ui.components import empty_state, render_sidebar, section_header
+from cogmaps.ui.components import empty_state, ontology_job_store, render_sidebar, section_header
 from cogmaps.ui.styles import apply_global_styles
 from cogmaps.qdrant.store import QdrantStore
 
@@ -96,6 +96,7 @@ with st.expander("⚠ danger zone — delete entire collection"):
                     try:
                         for msg in delete_ontologies_for_collection(qdrant_col, sb.qdrant_host, sb.qdrant_port):
                             st.caption(f"✓ {msg}")
+                        ontology_job_store().delete_jobs_for(qdrant_col)
                     except Exception as e:  # noqa: BLE001
                         st.warning(f"Could not fully delete the associated ontologies: {e}")
                 # A blueprint can exist without any ontology (discovery run, no build yet).
@@ -142,6 +143,9 @@ with st.expander("⚠ danger zone — delete ontology only"):
                 try:
                     for msg in delete_ontology(qdrant_col, _ontology_id, sb.qdrant_host, sb.qdrant_port):
                         st.caption(f"✓ {msg}")
+                    # Otherwise /build ontology/ still lists it, from its jobs.
+                    if ontology_job_store().delete_jobs_for(qdrant_col, _ontology_id):
+                        st.caption("✓ Its build, merge and reasoning runs forgotten.")
                     st.success("Ontology deleted.")
                     st.rerun()
                 except Exception as e:  # noqa: BLE001

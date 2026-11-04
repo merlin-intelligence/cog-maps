@@ -203,6 +203,22 @@ class OntologyJobStore:
                 return None
             return _job_from_row(row)
 
+    def delete_jobs_for(self, collection: str, ontology_id: str | None = None) -> int:
+        """Forget the collection's jobs — on ``ontology_id`` only, when given — with their logs
+        and LLM calls, once the ontology is deleted: otherwise the building page still lists it
+        (see :meth:`ontology_ids_for`). Returns the number of jobs deleted."""
+        query = "SELECT id FROM ontology_jobs WHERE collection=?"
+        params: tuple = (collection,)
+        if ontology_id:
+            query += " AND ontology_id=?"
+            params += (ontology_id,)
+        with self._lock, self._conn() as conn:
+            ids = [(r["id"],) for r in conn.execute(query, params).fetchall()]
+            conn.executemany("DELETE FROM ontology_job_logs WHERE job_id=?", ids)
+            conn.executemany("DELETE FROM ontology_job_llm_calls WHERE job_id=?", ids)
+            conn.executemany("DELETE FROM ontology_jobs WHERE id=?", ids)
+        return len(ids)
+
     def ontology_ids_for(self, collection: str) -> list[str]:
         """The ontologies jobs were launched on for the collection, oldest first."""
         with self._conn() as conn:

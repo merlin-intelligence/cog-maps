@@ -212,3 +212,23 @@ def test_latest_job_for_can_filter_by_ontology_and_lists_the_collection_ontologi
     assert store.latest_job_for("col", ontology_id="col__v3") is None
     assert store.ontology_ids_for("col") == ["col", "col__v2"]
     assert store.ontology_ids_for("other") == []
+
+
+def test_delete_jobs_for_forgets_the_ontology_jobs_only(tmp_path):
+    store = _store(tmp_path)
+    _create(store, "j1")
+    _create(store, "j2", collection="other")
+    store.create_job(
+        job_id="j3", collection="col", ontology_id="col__merged", doc_filenames=[],
+        llm_provider="scaleway", llm_model="m", job_type="merge",
+    )
+    store.append_log("j3", "merge failed")
+    store.append_llm_call("j3", {"model": "m"})
+
+    assert store.delete_jobs_for("col", "col__merged") == 1
+
+    assert store.get_job("j3") is None
+    assert store.get_logs("j3") == [] and store.get_llm_calls("j3") == []
+    assert store.ontology_ids_for("col") == ["main"]
+    assert store.delete_jobs_for("col") == 1
+    assert store.ontology_ids_for("col") == [] and store.get_job("j2") is not None

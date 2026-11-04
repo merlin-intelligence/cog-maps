@@ -18,6 +18,7 @@ from cogmaps.ontology.domain_discovery import (
 from cogmaps.ontology.cleanup import ontology_ids_for
 from cogmaps.ontology.graph import build_pyvis_html
 from cogmaps.ontology.olaf_config import (
+    alignment_path_for,
     export_oxigraph_ontology_ttl,
     has_ontology_content,
     list_backups,
@@ -30,11 +31,11 @@ from cogmaps.ontology.olaf_config import (
 from cogmaps.ontology.prompts import format_domain_guidelines
 from cogmaps.ontology.runner import OntologyJobRunner, build_domain_mode, build_seed_ids
 from cogmaps.ontology.seeds import list_seeds
-from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import check_password, is_admin, list_visible_collections
 from cogmaps.ui.components import (
     empty_state,
+    ontology_job_store,
     render_llm_impacts_footer,
     render_sidebar,
     section_header,
@@ -45,14 +46,8 @@ from cogmaps.ui.styles import apply_global_styles
 # ── Module-level singletons (one per server process, shared across sessions) ──
 
 @st.cache_resource
-def _ontology_job_store() -> OntologyJobStore:
-    os.makedirs("user_data", exist_ok=True)
-    return OntologyJobStore(os.path.join("user_data", "jobs.db"))
-
-
-@st.cache_resource
 def _ontology_job_runner(qdrant_host: str, qdrant_port: int) -> OntologyJobRunner:
-    return OntologyJobRunner(_ontology_job_store(), qdrant_host, qdrant_port)
+    return OntologyJobRunner(ontology_job_store(), qdrant_host, qdrant_port)
 
 
 @st.cache_data(ttl=15, show_spinner=False)
@@ -122,7 +117,7 @@ _ontology_ids = list(dict.fromkeys([
     _default_ontology_id,
     *_oxigraph_ontology_ids(qdrant_col),
     # also those of builds not exported yet (running, or failed before their first concept)
-    *_ontology_job_store().ontology_ids_for(qdrant_col),
+    *ontology_job_store().ontology_ids_for(qdrant_col),
 ]))
 # Set by a build launch (once the selectbox is drawn, its value can't change in that run).
 if _launched := st.session_state.pop(f"{_ontology_key}_next", None):
@@ -137,29 +132,46 @@ _ontology_choice = st.radio(
     help="Each ontology of the collection is built separately — its own graph, and its own progress "
          "through the chunks. Create a new one to build another version from the same documents.",
 )
+_NEW_MODES = {"build": "from documents", "merge": "by merging two ontologies"}
+_new_mode = "build"
 if _ontology_choice == _NEW_ONTOLOGY:
+    _new_mode = st.radio(
+        "create it", list(_NEW_MODES), format_func=_NEW_MODES.get, horizontal=True,
+        key=f"new_ontology_mode_{qdrant_col}",
+        help="Build it from this collection's documents, or merge two existing ontologies into it — "
+             "e.g. two built from different collections.",
+    )
     _new_name = st.text_input(
-        "new ontology name", placeholder="e.g. v2, legal…", key=f"new_ontology_name_{qdrant_col}",
+        "new ontology name", placeholder="e.g. v2, legal…" if _new_mode == "build" else "e.g. merged…",
+        key=f"new_ontology_name_{qdrant_col}",
         help="Letters and digits; other characters become '_'.",
     )
     ontology_id = ontology_id_for(qdrant_col, _new_name)
     if ontology_id == _default_ontology_id:
-        st.info("Name the new ontology to build it.")
+        st.info("Name the new ontology to create it.")
         st.stop()
     if ontology_id in _ontology_ids:
+        if _new_mode == "merge":
+            st.warning(f"The collection already has an ontology named “{ontology_name_of(qdrant_col, ontology_id)}”: "
+                       "merge into a new one.")
+            st.stop()
         st.warning(f"The collection already has an ontology named “{ontology_name_of(qdrant_col, ontology_id)}”: "
                    "a build will extend it.")
 else:
     ontology_id = _ontology_choice
-st.caption(f"ontology id: `{ontology_id}` — repeated builds on this ontology extend it")
+st.caption(f"ontology id: `{ontology_id}`" + (" — repeated builds on this ontology extend it" if _new_mode == "build" else ""))
+
+# The ontologies that can be merged: those of every collection the user can see → their collection.
+_collection_labels = {qname: label for label, qname in _visible}
+_source_ontologies = {oid: qname for _, qname in _visible for oid in _oxigraph_ontology_ids(qname)}
 
 filenames = sorted(store.existing_filenames(qdrant_col))
 
 # ── Job helpers ───────────────────────────────────────────────────────
 
-# Builds and reasoning runs each have their own active job, shown in their own
-# section of the page: "build" above the results, "reasoning" in the Reasoning section.
-_JOB_KINDS = {"build": "ontology build", "reasoning": "reasoning"}
+# Builds, merges and reasoning runs each have their own active job, shown in their own
+# section of the page: "build" or "merge" above the results, "reasoning" in the Reasoning section.
+_JOB_KINDS = {"build": "ontology build", "merge": "merge", "reasoning": "reasoning"}
 
 
 def _active_job_key(job_type: str) -> str:
@@ -175,7 +187,7 @@ def _job_log(job_id: str) -> str:
     the new lines."""
     key = f"ontology_log_{job_id}"
     cursor, buf = st.session_state.get(key, (0, ""))
-    new_entries = _ontology_job_store().get_logs(job_id, after_rowid=cursor)
+    new_entries = ontology_job_store().get_logs(job_id, after_rowid=cursor)
     if new_entries:
         rowids, messages = zip(*new_entries, strict=True)
         cursor, buf = rowids[-1], buf + "\n".join(messages) + "\n"
@@ -237,10 +249,10 @@ def _job_to_show(job_type: str) -> str | None:
     reload or a tab closure."""
     job_id = st.session_state.get(_active_job_key(job_type))
     if job_id:
-        job = _ontology_job_store().get_job(job_id)
+        job = ontology_job_store().get_job(job_id)
         if job and job["collection"] == qdrant_col and job["ontology_id"] == ontology_id:
             return job_id
-    latest = _ontology_job_store().latest_job_for(qdrant_col, job_type, ontology_id)
+    latest = ontology_job_store().latest_job_for(qdrant_col, job_type, ontology_id)
     return latest["id"] if latest else None
 
 
@@ -249,12 +261,11 @@ def _render_job_status(job_type: str) -> None:
     job_id = _job_to_show(job_type)
     if not job_id:
         return
-    job = _ontology_job_store().get_job(job_id)
+    job = ontology_job_store().get_job(job_id)
     if not job:
         return
 
     status = job["status"]
-    is_reasoning = job_type == "reasoning"
     icons = {"pending": "⏳", "running": "⚙️", "done": "✅", "failed": "❌"}
     st.markdown(
         f"**{icons.get(status, '·')} {_JOB_KINDS[job_type]}** — `{status}` "
@@ -266,11 +277,11 @@ def _render_job_status(job_type: str) -> None:
     if status in ("pending", "running"):
         st.progress(min(cur / tot, 1.0) if tot > 0 else 0)
         if tot > 0:
-            st.caption(f"{'step' if is_reasoning else 'iteration'} {cur} / {tot}")
+            st.caption(f"{'iteration' if job_type == 'build' else 'step'} {cur} / {tot}")
 
     log = _job_log(job_id)
     if log:
-        with st.expander(f"{'reasoning' if is_reasoning else 'build'} log", expanded=(status == "running")):
+        with st.expander(f"{job_type} log", expanded=(status == "running")):
             # Fixed height: the log scrolls instead of pushing the page down.
             with st.container(height=420):
                 st.code(log.strip(), language=None)
@@ -281,13 +292,14 @@ def _render_job_status(job_type: str) -> None:
             )
 
     if status == "done":
-        if is_reasoning:
-            st.success("Reasoning complete!")
+        st.success(f"{_JOB_KINDS[job_type].capitalize()} complete!")
+        if job_type == "reasoning":
             _render_reasoning_result(job["result"] or {})
-        else:
-            st.success("Ontology build complete!")
+        elif job_type == "merge":
+            _render_merge_result(job["result"] or {})
     elif status == "failed":
-        st.error(f"{'Reasoning' if is_reasoning else 'Ontology build'} failed — see the log above.")
+        st.error(f"{_JOB_KINDS[job_type].capitalize()} failed — see the log above."
+                 + (" Delete this ontology from /manage/ to merge again." if job_type == "merge" else ""))
 
     # Once per job, refresh the results section when it ends: the ontology changed. Only
     # for a job watched while it ran — not for an old run shown again after a reload.
@@ -363,146 +375,264 @@ _DOMAIN_MODES = {
 _flash_msg = st.session_state.pop("ontology_blueprint_flash", None)
 # Prefix for every editor widget key; changes whenever the saved blueprint does.
 _bp_key = f"{qdrant_col}_v{st.session_state.get(_blueprint_version_key(qdrant_col), 0)}"
-with st.container(border=True):
-    if _flash_msg:
-        st.success(_flash_msg)
-    st.markdown("#### 🧬 Domain guidance")
-    domain_mode = st.radio(
-        "domain guidance",
-        list(_DOMAIN_MODES),
-        index=list(_DOMAIN_MODES).index(build_domain_mode(_ontology_job_store(), qdrant_col, ontology_id)),
-        format_func=_DOMAIN_MODES.get,
-        horizontal=True,
-        label_visibility="collapsed",
-        key=f"domain_mode_{ontology_id}",
-        help="Optional text added to the agent's prompt to tailor it to this corpus. "
-             "Defaults to the choice of this ontology's last build.",
-    )
 
-    if domain_mode == "none":
-        st.caption("The agent uses the default, domain-neutral prompt.")
 
-    elif domain_mode == "llm":
-        blueprint = load_blueprint(qdrant_col)
-        col_d1, col_d2 = st.columns([0.72, 0.28], vertical_alignment="center")
-        with col_d1:
-            if blueprint:
-                st.markdown(
-                    f"**Inferred Domain:** {blueprint.inferred_domain} &nbsp;·&nbsp; "
-                    f"`{blueprint.epistemological_nature}`"
-                )
-                if blueprint.generated_at:
+def _render_build() -> None:
+    """Domain guidance, then the documents and the seeds of a build, and its launch."""
+    with st.container(border=True):
+        if _flash_msg:
+            st.success(_flash_msg)
+        st.markdown("#### 🧬 Domain guidance")
+        domain_mode = st.radio(
+            "domain guidance",
+            list(_DOMAIN_MODES),
+            index=list(_DOMAIN_MODES).index(build_domain_mode(ontology_job_store(), qdrant_col, ontology_id)),
+            format_func=_DOMAIN_MODES.get,
+            horizontal=True,
+            label_visibility="collapsed",
+            key=f"domain_mode_{ontology_id}",
+            help="Optional text added to the agent's prompt to tailor it to this corpus. "
+                 "Defaults to the choice of this ontology's last build.",
+        )
+
+        if domain_mode == "none":
+            st.caption("The agent uses the default, domain-neutral prompt.")
+
+        elif domain_mode == "llm":
+            blueprint = load_blueprint(qdrant_col)
+            col_d1, col_d2 = st.columns([0.72, 0.28], vertical_alignment="center")
+            with col_d1:
+                if blueprint:
+                    st.markdown(
+                        f"**Inferred Domain:** {blueprint.inferred_domain} &nbsp;·&nbsp; "
+                        f"`{blueprint.epistemological_nature}`"
+                    )
+                    if blueprint.generated_at:
+                        st.caption(
+                            f"discovered {blueprint.generated_at[:16].replace('T', ' ')} "
+                            f"from {blueprint.source_document_count} document(s)"
+                            + (" · ✍️ edited by hand" if blueprint.guidelines else "")
+                        )
+                    if blueprint.source_document_count is not None and blueprint.source_document_count != len(filenames):
+                        st.warning(
+                            f"The collection now has {len(filenames)} document(s) — "
+                            "this blueprint may be out of date. Consider re-discovering."
+                        )
+                else:
                     st.caption(
-                        f"discovered {blueprint.generated_at[:16].replace('T', ' ')} "
-                        f"from {blueprint.source_document_count} document(s)"
-                        + (" · ✍️ edited by hand" if blueprint.guidelines else "")
+                        f"Not discovered yet: run it now to review and edit the result, or it runs "
+                        f"at launch (**{_discovery_model}**)."
                     )
-                if blueprint.source_document_count is not None and blueprint.source_document_count != len(filenames):
-                    st.warning(
-                        f"The collection now has {len(filenames)} document(s) — "
-                        "this blueprint may be out of date. Consider re-discovering."
-                    )
-            else:
-                st.caption(
-                    f"Not discovered yet: run it now to review and edit the result, or it runs "
-                    f"at launch (**{_discovery_model}**)."
-                )
-        with col_d2:
-            if blueprint:
-                # Replaces the text, hand edits included: confirm first.
-                with st.popover("↻ re-discover", use_container_width=True):
-                    st.caption("Replaces the current text — and your edits — with a new LLM discovery.")
-                    if st.button("confirm re-discover", key=f"bp_rediscover_{_bp_key}"):
-                        _run_discovery()
-            elif st.button("🔍 discover", use_container_width=True):
-                _run_discovery()
+            with col_d2:
+                if blueprint:
+                    # Replaces the text, hand edits included: confirm first.
+                    with st.popover("↻ re-discover", use_container_width=True):
+                        st.caption("Replaces the current text — and your edits — with a new LLM discovery.")
+                        if st.button("confirm re-discover", key=f"bp_rediscover_{_bp_key}"):
+                            _run_discovery()
+                elif st.button("🔍 discover", use_container_width=True):
+                    _run_discovery()
 
-        if blueprint:
-            with st.form(key=f"edit_blueprint_text_{_bp_key}"):
-                guidelines_text = st.text_area(
-                    "Discovered guidelines — edit them freely (markdown)",
-                    value=format_domain_guidelines(blueprint),
+            if blueprint:
+                with st.form(key=f"edit_blueprint_text_{_bp_key}"):
+                    guidelines_text = st.text_area(
+                        "Discovered guidelines — edit them freely (markdown)",
+                        value=format_domain_guidelines(blueprint),
+                        height=420,
+                        key=f"bp_text_{_bp_key}",
+                    )
+                    if st.form_submit_button("💾 Save", type="primary"):
+                        blueprint.guidelines = guidelines_text.strip() or None
+                        save_blueprint(qdrant_col, blueprint)
+                        _blueprint_changed("Domain guidelines saved!")
+                        st.rerun()
+
+        else:
+            with st.form(key=f"edit_manual_guidelines_{_bp_key}"):
+                manual_text = st.text_area(
+                    "Your guidelines (markdown)",
+                    value=load_manual_guidelines(qdrant_col) or _GUIDELINES_TEMPLATE,
                     height=420,
-                    key=f"bp_text_{_bp_key}",
+                    key=f"manual_text_{_bp_key}",
                 )
                 if st.form_submit_button("💾 Save", type="primary"):
-                    blueprint.guidelines = guidelines_text.strip() or None
-                    save_blueprint(qdrant_col, blueprint)
+                    save_manual_guidelines(qdrant_col, manual_text.strip())
                     _blueprint_changed("Domain guidelines saved!")
                     st.rerun()
+            if not load_manual_guidelines(qdrant_col):
+                st.caption("Not saved yet — the build only uses saved text.")
 
+    # ── Document selection & launch ──
+
+    if not filenames:
+        empty_state("📄", "No documents in this collection yet.")
     else:
-        with st.form(key=f"edit_manual_guidelines_{_bp_key}"):
-            manual_text = st.text_area(
-                "Your guidelines (markdown)",
-                value=load_manual_guidelines(qdrant_col) or _GUIDELINES_TEMPLATE,
-                height=420,
-                key=f"manual_text_{_bp_key}",
-            )
-            if st.form_submit_button("💾 Save", type="primary"):
-                save_manual_guidelines(qdrant_col, manual_text.strip())
-                _blueprint_changed("Domain guidelines saved!")
-                st.rerun()
-        if not load_manual_guidelines(qdrant_col):
-            st.caption("Not saved yet — the build only uses saved text.")
-
-# ── Document selection & launch ─────────────────────────────────────────
-
-if not filenames:
-    empty_state("📄", "No documents in this collection yet.")
-else:
-    selected_docs = st.multiselect(
-        "documents to include in this build",
-        filenames,
-        default=filenames,
-        help="Deselect any document to exclude it from this build. Chunks already "
-             "processed in a previous build are skipped automatically.",
-    )
-    model = st.selectbox("model (tool-calling)", ONTOLOGY_TOOLCALL_MODELS)
-    try:
-        available_seeds = [s.seed_id for s in list_seeds()]
-    except Exception as e:  # noqa: BLE001
-        available_seeds = []
-        st.warning(f"Could not list the seed ontologies: {e}")
-    if available_seeds:
-        last_seeds = build_seed_ids(_ontology_job_store(), qdrant_col, ontology_id)
-        selected_seeds = st.multiselect(
-            "seed ontologies to reuse",
-            available_seeds,
-            default=[s for s in last_seeds if s in available_seeds],
-            help="Reference ontologies the agent searches and reuses terms from (classes, properties, "
-                 "individuals), under their own URIs — new classes become subclasses of seed classes where "
-                 "that is true. Defaults to the seeds of this ontology's last build. "
-                 "Load seeds from /explore ontology/.",
+        selected_docs = st.multiselect(
+            "documents to include in this build",
+            filenames,
+            default=filenames,
+            help="Deselect any document to exclude it from this build. Chunks already "
+                 "processed in a previous build are skipped automatically.",
         )
-    else:
-        selected_seeds = []
-        st.caption("No seed ontology loaded — load reference ontologies from /explore ontology/ to reuse them here.")
-
-    if not sb.scaleway_api_key:
-        st.warning("Set SCALEWAY_API_KEY to run the ontology-building agent (Scaleway tool-calling only).")
-    elif st.button("▶ launch build", type="primary"):
-        if not selected_docs:
-            st.warning("Select at least one document.")
-        else:
-            job_id = str(uuid.uuid4())
-            _ontology_job_store().create_job(
-                job_id=job_id,
-                collection=qdrant_col,
-                ontology_id=ontology_id,
-                doc_filenames=selected_docs,
-                llm_provider="scaleway",
-                llm_model=model,
-                use_domain_discovery=domain_mode != "none",
-                options={"seed_ids": selected_seeds, "domain_mode": domain_mode},
+        model = st.selectbox("model (tool-calling)", ONTOLOGY_TOOLCALL_MODELS)
+        try:
+            available_seeds = [s.seed_id for s in list_seeds()]
+        except Exception as e:  # noqa: BLE001
+            available_seeds = []
+            st.warning(f"Could not list the seed ontologies: {e}")
+        if available_seeds:
+            last_seeds = build_seed_ids(ontology_job_store(), qdrant_col, ontology_id)
+            selected_seeds = st.multiselect(
+                "seed ontologies to reuse",
+                available_seeds,
+                default=[s for s in last_seeds if s in available_seeds],
+                help="Reference ontologies the agent searches and reuses terms from (classes, properties, "
+                     "individuals), under their own URIs — new classes become subclasses of seed classes where "
+                     "that is true. Defaults to the seeds of this ontology's last build. "
+                     "Load seeds from /explore ontology/.",
             )
-            _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
-            _activate_job(job_id, "build")
-            # A new ontology is now one of the collection's: select it.
-            st.session_state[f"{_ontology_key}_next"] = ontology_id
-            st.rerun()
+        else:
+            selected_seeds = []
+            st.caption("No seed ontology loaded — load reference ontologies from /explore ontology/ to reuse them here.")
 
-_render_job_status("build")
+        if not sb.scaleway_api_key:
+            st.warning("Set SCALEWAY_API_KEY to run the ontology-building agent (Scaleway tool-calling only).")
+        elif st.button("▶ launch build", type="primary"):
+            if not selected_docs:
+                st.warning("Select at least one document.")
+            else:
+                job_id = str(uuid.uuid4())
+                ontology_job_store().create_job(
+                    job_id=job_id,
+                    collection=qdrant_col,
+                    ontology_id=ontology_id,
+                    doc_filenames=selected_docs,
+                    llm_provider="scaleway",
+                    llm_model=model,
+                    use_domain_discovery=domain_mode != "none",
+                    options={"seed_ids": selected_seeds, "domain_mode": domain_mode},
+                )
+                _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
+                _activate_job(job_id, "build")
+                # A new ontology is now one of the collection's: select it.
+                st.session_state[f"{_ontology_key}_next"] = ontology_id
+                st.rerun()
+
+    _render_job_status("build")
+
+
+# ── Merge ──────────────────────────────────────────────────────────────
+
+def _ontology_label(oid: str) -> str:
+    """"collection · name" of one of the ontologies that can be merged (else its id: one since deleted)."""
+    if (collection := _source_ontologies.get(oid)) is None:
+        return oid
+    return f"{_collection_labels.get(collection, collection)} · {ontology_name_of(collection, oid) or 'default'}"
+
+
+def _render_merge_form() -> None:
+    """Pick the two ontologies to merge into the new one, and launch the merge."""
+    sources = [oid for oid in _source_ontologies if oid != ontology_id]
+    if len(sources) < 2:
+        empty_state("🔀", "Merging needs two built ontologies — build them first.")
+        return
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        reference = st.selectbox(
+            "reference ontology", sources, format_func=_ontology_label, key=f"merge_reference_{ontology_id}",
+            help="Kept as it is: when an entity of the other ontology means the same thing as one of its own, "
+                 "it is merged into it, under this one's URI, label and definition. Pick the better curated one.",
+        )
+    with col_m2:
+        other = st.selectbox(
+            "ontology merged into it", [oid for oid in sources if oid != reference], format_func=_ontology_label,
+            key=f"merge_other_{ontology_id}",
+        )
+    model = st.selectbox("model", ONTOLOGY_TOOLCALL_MODELS, key="merge_model")
+    with st.expander("options"):
+        min_confidence = st.slider(
+            "min confidence", 0.5, 0.95, 0.7, 0.05,
+            help="Correspondences the LLM is less sure of are only listed in the alignment, not applied.",
+        )
+    st.caption(
+        "The two ontologies are copied into the new one and left unchanged. Their entities are aligned — "
+        "the LLM judges each pair of similar ones: same thing (merged), more specific (linked under it) or "
+        "unrelated — from their definitions and source text."
+    )
+    if not sb.scaleway_api_key:
+        st.warning("Set SCALEWAY_API_KEY to run the merging agent (Scaleway only).")
+    elif st.button("▶ launch merge", type="primary"):
+        job_id = str(uuid.uuid4())
+        ontology_job_store().create_job(
+            job_id=job_id,
+            collection=qdrant_col,
+            ontology_id=ontology_id,
+            doc_filenames=[],
+            llm_provider="scaleway",
+            llm_model=model,
+            job_type="merge",
+            options={
+                "reference": reference, "other": other,
+                "reference_collection": _source_ontologies[reference],
+                "other_collection": _source_ontologies[other],
+                "min_confidence": min_confidence,
+                # What the reasoning on the merged ontology works with.
+                "seed_ids": list(dict.fromkeys(
+                    seed for oid in (reference, other)
+                    for seed in build_seed_ids(ontology_job_store(), _source_ontologies[oid], oid)
+                )),
+            },
+        )
+        _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
+        _activate_job(job_id, "merge")
+        st.session_state[f"{_ontology_key}_next"] = ontology_id
+        st.rerun()
+
+
+def _render_merge_result(result: dict) -> None:
+    """What a merge did: correspondences applied or not, the alignment, and the final check."""
+    cols = st.columns(3)
+    cols[0].metric("entities merged", result.get("equivalent", 0),
+                   help="Entities of the other ontology judged the same as one of the reference: now one.")
+    cols[1].metric("subclass links added", result.get("subsumptions", 0),
+                   help="An entity judged more specific than one of the other ontology is linked under it.")
+    cols[2].metric("not applied", result.get("not_applied", 0),
+                   help="Correspondences below the min confidence, or whose domain/range don't fit: "
+                        "only listed in the alignment, to review.")
+    if issues := (result.get("check") or {}).get("issues"):
+        st.info(f"The check of the merged ontology found {issues} issue(s) — run the reasoning "
+                "below to fix them and merge the remaining duplicates.")
+    if rows := result.get("correspondences"):
+        with st.expander(f"alignment ({len(rows)} correspondences)"):
+            st.dataframe(rows, hide_index=True, use_container_width=True)
+            alignment_file = alignment_path_for(qdrant_col, ontology_id)
+            if os.path.exists(alignment_file):
+                with open(alignment_file, encoding="utf-8") as f:
+                    st.download_button(
+                        "download alignment (SSSOM)", f.read().encode("utf-8"),
+                        file_name=f"{ontology_id}.alignment.sssom.tsv", mime="text/tab-separated-values",
+                    )
+
+
+def _render_merge_info(job: dict) -> None:
+    """A merged ontology: where it comes from, and its merge run."""
+    with st.container(border=True):
+        options = job["options"]
+        st.markdown("#### 🔀 Merged ontology")
+        st.caption(
+            f"**{_ontology_label(options['other'])}** merged into **{_ontology_label(options['reference'])}** "
+            "(reference). Not extended by builds: refine it with the reasoning below."
+        )
+        _render_job_status("merge")
+
+
+_merge_job = ontology_job_store().latest_job_for(qdrant_col, "merge", ontology_id)
+if _ontology_choice == _NEW_ONTOLOGY and _new_mode == "merge":
+    _render_merge_form()
+elif _merge_job:
+    _render_merge_info(_merge_job)
+else:
+    _render_build()
 
 st.markdown("---")
 
@@ -567,20 +697,20 @@ def _render_reasoning() -> None:
                      "axiom, which it fixes before anything is written. Unticked, inferences are written as is.",
             )
 
-        reasoning_seeds = build_seed_ids(_ontology_job_store(), qdrant_col, ontology_id)
+        reasoning_seeds = build_seed_ids(ontology_job_store(), qdrant_col, ontology_id)
         st.caption(
             f"seeds (from the last build): {', '.join(reasoning_seeds)}" if reasoning_seeds
             else "seeds: none (the last build used no seed ontology)"
         )
 
-        latest = _ontology_job_store().latest_job_for(qdrant_col, ontology_id=ontology_id)
+        latest = ontology_job_store().latest_job_for(qdrant_col, ontology_id=ontology_id)
         busy = latest is not None and latest["status"] in ("running", "pending")
         if not sb.scaleway_api_key:
             st.warning("Set SCALEWAY_API_KEY to run the reasoning agent (Scaleway tool-calling only).")
         elif st.button("▶ launch reasoning", type="primary", disabled=busy,
                        help="A job is already running for this ontology." if busy else None):
             job_id = str(uuid.uuid4())
-            _ontology_job_store().create_job(
+            ontology_job_store().create_job(
                 job_id=job_id,
                 collection=qdrant_col,
                 ontology_id=ontology_id,
@@ -661,7 +791,7 @@ if ttl:
         except Exception as e:  # noqa: BLE001
             st.error(f"Could not render the graph view: {e}")
 else:
-    empty_state("🧬", "This ontology isn't built yet — launch a build above.")
+    empty_state("🧬", "This ontology has no content yet — launch a build or a merge above.")
 
 
 # ── LLM impacts footer ────────────────────────────────────────────────
@@ -673,7 +803,7 @@ def _render_llm_impacts() -> None:
     calls = list(session_llm_calls("ontology_building"))
     for job_type in _JOB_KINDS:
         if job_id := _job_to_show(job_type):
-            calls += [LLMCallImpact.from_dict(d) for d in _ontology_job_store().get_llm_calls(job_id)]
+            calls += [LLMCallImpact.from_dict(d) for d in ontology_job_store().get_llm_calls(job_id)]
     calls.sort(key=lambda c: c.timestamp)
     render_llm_impacts_footer(calls, key="ontology_building")
 

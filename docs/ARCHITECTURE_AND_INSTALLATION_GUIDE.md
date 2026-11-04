@@ -442,6 +442,37 @@ pairs declared, inferences materialized, and the problem counts of every check.
   worker, so they never write to the same graph at once; the reasoning launch
   button is disabled while a job runs on the ontology.
 
+#### Merging two ontologies
+
+Under **+ new ontology**, *create it by merging two ontologies* merges two
+existing ontologies — of any collection the user can see, e.g. two built from
+different corpora — into the new one, a `merge` job (same runner, store and log
+view as builds) running `cogmaps.ontology.merging_agent`, ported from OLAF's
+[`olaf_merging_agent`](https://github.com/merlin-intelligence/olaf/tree/main/demos/olaf_merging_agent)
+demo (prompts copied in `cogmaps.ontology.merging_prompts`):
+
+1. **Import** — both are copied into the new ontology with `ontology_import`
+   (they are left unchanged). An entity of the other ontology whose name the
+   reference already uses is renamed (`#Fund_<id>`), never merged silently.
+2. **Match** — for each class, then property, then individual of the other
+   ontology, the reference entities of the same kind with the same name or a
+   semantic similarity ≥ 0.7 are its candidates.
+3. **Decide** — the LLM judges 8 entities at a time, with their definitions,
+   parents and source chunks (read from each ontology's collection):
+   `equivalent`, `narrower`, `broader` or `none`, with a confidence.
+4. **Merge** — decisions at or above **min confidence** (default 0.7) are
+   applied: `concept_merge` into the reference's entity, or an
+   `rdfs:subClassOf` / `rdfs:subPropertyOf` link. Property correspondences are
+   only applied when their domains and ranges fit.
+
+The alignment (one row per correspondence, applied or not, between the source
+URIs) is shown on the page and saved as an SSSOM TSV,
+`user_data/ontology/<ontology>.alignment.sssom.tsv`, removed with the ontology.
+A merged ontology is not extended by builds (it has no progress through the
+chunks of either source); the page shows its merge report instead, and the
+reasoning — with the seeds of both sources — catches the remaining duplicates
+and fixes what the merge brought to light.
+
 #### Domain discovery (optional)
 
 A *domain blueprint* tailors the build agent's system prompt to the corpus: an
