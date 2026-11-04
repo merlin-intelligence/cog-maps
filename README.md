@@ -35,6 +35,7 @@ CogMaps is a sophisticated knowledge management and exploration application buil
    - Background jobs, like ingestion — an interrupted build can be re-launched and resumes where it stopped (processed chunks are skipped).
    - **Several ontologies per collection**: besides the collection's default ontology, build named ones (e.g. `v2`) from the same documents — each with its own graph and its own progress through the chunks.
    - **Reasoning**: once an ontology is built, a reasoning agent (ported from OLAF's `olaf_reasoning_agent` demo) curates it with the Pellet OWL reasoner — merges duplicate classes, repairs logical problems (inconsistency, unsatisfiable classes, subclass cycles, domain/range violations, unknown terms, orphans…) from the source chunks, declares disjoint sibling classes, then reviews what the ontology entails and writes it in, marked as inferred (drawn dotted in the graph view). The ontology is backed up before any change and can be restored from the page. The OWL reasoner needs Java 11+.
+   - **Merging**: a new ontology can also be created by merging two existing ones (e.g. built from different collections): a merging agent (ported from OLAF's `olaf_merging_agent` demo) aligns their entities — the LLM judges each pair of similar ones: same thing (merged), more specific (linked under it) or unrelated — and merges them along that alignment. The alignment is shown on the page and downloadable as SSSOM.
    - **Seed ontologies**: reference ontologies (FIBO, schema.org, a domain standard…) loaded by admins from a file or a URL on `/explore ontology/` (🌱 seeds tab), shared by every ontology and indexed for semantic search. Each build picks the seeds to reuse: the agent reuses their terms under their own URIs (same meaning) or subclasses them (narrower meaning) instead of re-creating them.
    - Optional **domain discovery**: a per-collection *domain blueprint* (inferred domain + taxonomical pillars), synthesized from a corpus sample (then editable), or guidelines written by hand, tailor the agent's prompt. Chosen per build: none, LLM discovery or written by hand.
    - **Ask the ontology**: a read-only search agent (ported from OLAF's `olaf_searching_agent` demo) answers natural-language questions with OLAF's search tools and agent-written SPARQL, then shows the part of the ontology it used (entities + direct neighbors) and the source chunks behind the answer. Follow-up questions keep the conversation's context.
@@ -68,7 +69,7 @@ cogmaps/                      importable package
 ├── pipelines/                 ingestion orchestration (Ingester)
 ├── jobs/                       async ingestion job system (SQLite store + daemon runner)
 ├── ontology/                   ontology building — OLAF/MCP agent loop, build job runner,
-│                             reasoning agent, domain discovery, search agent, Oxigraph client,
+│                             reasoning & merging agents, domain discovery, search agent, Oxigraph client,
 │                             graph view, cleanup, seed ontologies
 └── ui/                          Streamlit-only code (auth, components, styles)
 

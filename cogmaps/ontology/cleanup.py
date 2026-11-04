@@ -32,6 +32,7 @@ from cogmaps.ontology.domain_discovery import delete_blueprint
 from cogmaps.ontology.olaf_cli import run_olaf, scratch_config_dir
 from cogmaps.ontology.olaf_config import (
     LEGACY_CONCEPTS_PREFIX,
+    alignment_path_for,
     backup_dir_for,
     collection_ontology_ids,
     ttl_path_for,
@@ -59,7 +60,7 @@ def ontology_ids_for(collection: str) -> list[str]:
 
 def delete_ontology(collection: str, ontology_id: str, qdrant_host: str, qdrant_port: int) -> list[str]:
     """Drop one of the collection's ontologies: its Oxigraph graph + semantic index (and legacy
-    concepts collection) + its chunk processing status + cached .ttl export + reasoning backups.
+    concepts collection) + its chunk processing status + cached .ttl export + merge alignment + reasoning backups.
 
     The collection's domain blueprint is shared by all its ontologies: left in place.
     Returns human-readable status lines for each step actually performed.
@@ -88,6 +89,11 @@ def delete_ontology(collection: str, ontology_id: str, qdrant_host: str, qdrant_
     if os.path.exists(ttl_file):
         os.remove(ttl_file)
         messages.append("Cached Turtle export removed.")
+
+    alignment_file = alignment_path_for(collection, ontology_id)
+    if os.path.exists(alignment_file):
+        os.remove(alignment_file)
+        messages.append("Merge alignment removed.")
 
     backup_dir = backup_dir_for(collection, ontology_id)
     if backup_dir.is_dir():

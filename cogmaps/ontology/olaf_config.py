@@ -126,6 +126,11 @@ def ttl_path_for(collection: str, ontology_id: str | None = None) -> str:
     return str(USER_DATA_DIR / "ontology" / f"{_local_name(collection, ontology_id)}.ttl")
 
 
+def alignment_path_for(collection: str, ontology_id: str) -> str:
+    """Where the alignment (SSSOM TSV) of a merged ontology's two sources is persisted."""
+    return str(USER_DATA_DIR / "ontology" / f"{_local_name(collection, ontology_id)}.alignment.sssom.tsv")
+
+
 def backup_dir_for(collection: str, ontology_id: str | None = None) -> Path:
     """Where the reasoning agent's pre-change Turtle backups of a collection's ontology go."""
     return USER_DATA_DIR / "ontology" / "backups" / _local_name(collection, ontology_id)

@@ -26,7 +26,7 @@ python-dotenv
 eigenmind==0.2.0
 # OLAF's server.py uses the pre-2.0 low-level Server API (removed in mcp 2.0) — see pyproject.toml
 mcp<2.0.0
-olaf @ git+https://github.com/merlin-intelligence/olaf.git@0cdffa3cec8f77c437895fefe101e59869fcd872
+olaf @ git+https://github.com/merlin-intelligence/olaf.git@ad2a82b9ffa28dabbf2879a60dcfdb1d323c0986
 litellm
 ecologits
 opentelemetry-api

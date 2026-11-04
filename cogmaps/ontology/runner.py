@@ -1,4 +1,4 @@
-"""Daemon thread that processes ontology jobs (builds and reasoning runs) from an in-memory queue.
+"""Daemon thread that processes ontology jobs (builds, merges and reasoning runs) from an in-memory queue.
 
 Mirrors :class:`cogmaps.jobs.runner.JobRunner`'s shape (single worker thread,
 sequential processing) — here sequential also avoids concurrent writers to
@@ -29,9 +29,11 @@ from cogmaps.ontology.domain_discovery import (
     load_manual_guidelines,
 )
 from cogmaps.ontology.mcp_client import olaf_session
+from cogmaps.ontology.merging_agent import run_merge
 from cogmaps.ontology.olaf_cli import write_config
 from cogmaps.ontology.olaf_config import (
     SHARED_STATUS_FIELDS,
+    alignment_path_for,
     chunk_status_field,
     export_oxigraph_ontology_ttl,
     has_ontology_content,
@@ -126,15 +128,18 @@ def build_domain_mode(store: OntologyJobStore, collection: str, ontology_id: str
 
 
 def build_seed_ids(store: OntologyJobStore, collection: str, ontology_id: str) -> list[str]:
-    """The seeds selected for the ontology's latest build — those it reuses terms from."""
-    job = store.latest_job_for(collection, "build", ontology_id)
+    """The seeds selected for the ontology's latest build — those it reuses terms from. For a
+    merged ontology, those of its two sources."""
+    job = store.latest_job_for(collection, "build", ontology_id) or store.latest_job_for(
+        collection, "merge", ontology_id,
+    )
     return job["options"].get("seed_ids", []) if job else []
 
 
 class OntologyJobRunner:
     """Single-worker background runner for ontology jobs.
 
-    Builds and reasoning runs share the one worker, so they never write to the
+    Builds, merges and reasoning runs share the one worker, so they never write to the
     same Oxigraph graph at the same time.
     """
 
@@ -183,6 +188,9 @@ class OntologyJobRunner:
         collection = job["collection"]
         if job.get("job_type") == "reasoning":
             await self._run_reasoning(job, log, set_progress)
+            return
+        if job.get("job_type") == "merge":
+            await self._run_merge(job, log, set_progress)
             return
         config_dir = tempfile.mkdtemp(prefix=f"cogmaps_olaf_{job_id}_")
         try:
@@ -280,6 +288,45 @@ class OntologyJobRunner:
                     infer=options.get("infer", True),
                     review_inferences=options.get("review_inferences", True),
                     seed_ids=build_seed_ids(self.store, collection, job["ontology_id"]),
+                )
+            self.store.set_result(job_id, summary)
+            self.store.set_status(job_id, "done")
+        except Exception as e:  # noqa: BLE001
+            self.store.set_status(job_id, "failed")
+            log(f"Fatal: {e}\n{traceback.format_exc()}")
+        finally:
+            shutil.rmtree(config_dir, ignore_errors=True)
+
+    async def _run_merge(self, job: dict, log: Callable[[str], None], set_progress) -> None:
+        """Merge the job's two source ontologies into its (new, empty) ontology."""
+        job_id, collection, options = job["id"], job["collection"], job["options"]
+        config_dir = tempfile.mkdtemp(prefix=f"cogmaps_olaf_{job_id}_")
+        try:
+            self._write_config(config_dir, job)
+
+            def alignment_cb(tsv: str) -> None:
+                path = alignment_path_for(collection, job["ontology_id"])
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(tsv)
+
+            log(f"Starting OLAF merge of {options['reference']!r} (reference) and {options['other']!r} "
+                f"into ontology_id={job['ontology_id']!r}")
+            async with olaf_session(config_dir) as session:
+                summary = await run_merge(
+                    session,
+                    model=job["llm_model"],
+                    api_key=scaleway_api_key(),
+                    ontology_id=job["ontology_id"],
+                    reference_id=options["reference"],
+                    other_id=options["other"],
+                    reference_collection=options.get("reference_collection"),
+                    other_collection=options.get("other_collection"),
+                    min_confidence=options.get("min_confidence", 0.7),
+                    log=log,
+                    set_progress=set_progress,
+                    alignment_cb=alignment_cb,
+                    export_cb=_ttl_writer(collection, job["ontology_id"]),
                 )
             self.store.set_result(job_id, summary)
             self.store.set_status(job_id, "done")

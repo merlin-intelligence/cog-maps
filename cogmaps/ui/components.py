@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ from cogmaps.config import (
 from cogmaps.config import scaleway_api_key as env_scaleway_key
 from cogmaps.core.embeddings import EmbeddingModel
 from cogmaps.core.llm_impacts import LLMCallImpact
+from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.ui.auth import (
     UserDBError,
     current_user,
@@ -72,6 +74,17 @@ def get_embedder(device: str) -> EmbeddingModel:
     ``release()`` the returned instance; let the cache own its lifecycle.
     """
     return EmbeddingModel(device=device)
+
+
+@st.cache_resource
+def ontology_job_store() -> OntologyJobStore:
+    """The ontology jobs store, one per server process, shared by the pages.
+
+    Opening a store marks the jobs still running as interrupted: a page must
+    never open its own while another page's jobs run.
+    """
+    os.makedirs("user_data", exist_ok=True)
+    return OntologyJobStore(os.path.join("user_data", "jobs.db"))
 
 
 def _detect_devices() -> list[str]:
