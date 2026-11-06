@@ -48,10 +48,14 @@ if langfuse_enabled() and "langfuse_otel" not in litellm.callbacks:
 # (total, active) parameters in billions, per Scaleway model id. Dense models have
 # total == active. A model missing here is still recorded, without an estimate.
 SCALEWAY_MODEL_PARAMETERS: dict[str, tuple[float, float]] = {
-    "glm-5.2": (744, 40),  # EcoLogits repository (mistralai/glm-5-2)
+    "glm-5.3": (744, 40),  # assumed same architecture as glm-5.2 (EcoLogits: 744B/40B)
     "qwen3.8-27b": (27.8, 27.8),  # dense
     "qwen3-235b-a22b-instruct-2507": (235, 22),
-    "deepseek-v4-flash-0731": (284, 13),
+    "deepseek-v4.1-flash-1017": (284, 13),  # assumed same architecture as v4-flash
+    "qwen3.5-397b-a17b": (397, 17),
+    "qwen3.6-35b-a3b": (35, 3),
+    "mistral-medium-3.5-128b": (128, 128),  # assumed dense (Scaleway gives 128B total only)
+    "gemma-4-26b-a4b-it": (26, 4),
     "gpt-oss-120b": (117, 5.1),  # EcoLogits repository (openai/gpt-oss-120b)
 }
 
