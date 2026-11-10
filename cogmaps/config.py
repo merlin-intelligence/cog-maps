@@ -54,7 +54,7 @@ MAX_CONTEXT_CHARS = 60_000
 # env var.
 DEFAULT_LLM_PROVIDER = "scaleway"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
-# 2026-10-05: Scaleway's Generative APIs - Serverless catalog uses bare model
+# 2026-11-06: Scaleway's Generative APIs - Serverless catalog uses bare model
 # ids (no "org/" prefix, unlike Nebius) — verified against
 # https://www.scaleway.com/en/docs/generative-apis/reference-content/supported-models/
 # and cross-checked against the EOL table on that same page (deprecated/EOL
@@ -62,10 +62,14 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 # failing with a 422 "MODEL NOT FOUND" — Scaleway deprecates models on a
 # rolling schedule.
 SCALEWAY_MODELS = (
-    "glm-5.2",
+    "glm-5.3",
     "qwen3.8-27b",
     "qwen3-235b-a22b-instruct-2507",
-    "deepseek-v4-flash-0731",
+    "deepseek-v4.1-flash-1017",
+    "qwen3.5-397b-a17b",
+    "qwen3.6-35b-a3b",
+    "mistral-medium-3.5-128b",
+    "gemma-4-26b-a4b-it",
     "gpt-oss-120b",
 )
 
@@ -78,10 +82,14 @@ SCALEWAY_MODELS = (
 # Scaleway's docs call out that its tool-calling only works through their
 # Responses API, not Chat Completions (which is what litellm/this agent use).
 ONTOLOGY_TOOLCALL_MODELS = (
-    "glm-5.2",
+    "glm-5.3",
     "qwen3.8-27b",
     "qwen3-235b-a22b-instruct-2507",
-    "deepseek-v4-flash-0731",
+    "deepseek-v4.1-flash-1017",
+    "qwen3.5-397b-a17b",
+    "qwen3.6-35b-a3b",
+    "mistral-medium-3.5-128b",
+    "gemma-4-26b-a4b-it",
 )
 DEFAULT_DOMAIN_DISCOVERY_MODEL = "qwen3.8-27b"
 DOMAIN_PROFILES_DIR = os.path.join("user_data", "ontology", "domain_profiles")

@@ -138,8 +138,8 @@ def test_build_llm_client_defaults_to_scaleway():
 # ── ScalewayClient routes through litellm's native "scaleway/" provider ──
 
 def test_scaleway_client_uses_the_native_litellm_provider(monkeypatch):
-    client = ScalewayClient(model="glm-5.2", api_key="k")
-    assert client.litellm_model == "scaleway/glm-5.2"
+    client = ScalewayClient(model="glm-5.3", api_key="k")
+    assert client.litellm_model == "scaleway/glm-5.3"
 
     captured = {}
 
@@ -149,7 +149,7 @@ def test_scaleway_client_uses_the_native_litellm_provider(monkeypatch):
 
     monkeypatch.setattr("litellm.completion", fake_completion)
     client.chat("sys", "q")
-    assert captured["model"] == "scaleway/glm-5.2"
+    assert captured["model"] == "scaleway/glm-5.3"
     assert captured["api_key"] == "k"
     # No api_base override — litellm's "scaleway/" provider already knows it.
     assert captured["api_base"] is None
@@ -164,7 +164,7 @@ def _fake_completion_response(message: dict, finish_reason: str = "stop") -> Mod
 def _scaleway_reply(monkeypatch, message, finish_reason="stop"):
     response = _fake_completion_response(message, finish_reason)
     monkeypatch.setattr("litellm.completion", lambda **kw: response)
-    return ScalewayClient(model="glm-5.2", api_key="key")
+    return ScalewayClient(model="glm-5.3", api_key="key")
 
 
 def test_strip_reasoning_removes_think_blocks():

@@ -35,7 +35,7 @@ def test_known_scaleway_model_gets_an_estimate():
 
 def test_bigger_model_has_bigger_impact():
     small = estimate_impacts("scaleway/qwen3.8-27b", _response(), latency_s=3.0)
-    big = estimate_impacts("scaleway/glm-5.2", _response(), latency_s=3.0)
+    big = estimate_impacts("scaleway/glm-5.3", _response(), latency_s=3.0)
     assert big.energy_kwh > small.energy_kwh
 
 
@@ -50,12 +50,12 @@ def test_tracked_completion_reports_to_the_active_sink_only(monkeypatch):
     monkeypatch.setattr(litellm, "completion", lambda **kw: _response())
     recorded: list[LLMCallImpact] = []
 
-    tracked_completion(model="scaleway/glm-5.2", messages=[])  # no sink: nothing recorded
+    tracked_completion(model="scaleway/glm-5.3", messages=[])  # no sink: nothing recorded
     with record_llm_impacts(recorded.append):
-        tracked_completion(model="scaleway/glm-5.2", messages=[])
-    tracked_completion(model="scaleway/glm-5.2", messages=[])
+        tracked_completion(model="scaleway/glm-5.3", messages=[])
+    tracked_completion(model="scaleway/glm-5.3", messages=[])
 
-    assert [c.model for c in recorded] == ["scaleway/glm-5.2"]
+    assert [c.model for c in recorded] == ["scaleway/glm-5.3"]
 
 
 def test_sink_is_reached_from_asyncio_to_thread(monkeypatch):
@@ -63,7 +63,7 @@ def test_sink_is_reached_from_asyncio_to_thread(monkeypatch):
     recorded: list[LLMCallImpact] = []
 
     async def agent():
-        await asyncio.to_thread(tracked_completion, model="scaleway/glm-5.2", messages=[])
+        await asyncio.to_thread(tracked_completion, model="scaleway/glm-5.3", messages=[])
 
     with record_llm_impacts(recorded.append):
         asyncio.run(agent())
@@ -78,12 +78,12 @@ def test_a_failing_sink_does_not_break_the_request(monkeypatch):
         raise RuntimeError("boom")
 
     with record_llm_impacts(broken_sink):
-        assert tracked_completion(model="scaleway/glm-5.2", messages=[]) is response
+        assert tracked_completion(model="scaleway/glm-5.3", messages=[]) is response
 
 
 def test_job_store_round_trips_llm_calls(tmp_path):
     store = OntologyJobStore(str(tmp_path / "jobs.db"))
-    call = estimate_impacts("scaleway/glm-5.2", _response(), latency_s=2.0)
+    call = estimate_impacts("scaleway/glm-5.3", _response(), latency_s=2.0)
     store.append_llm_call("job-1", call.to_dict())
     store.append_llm_call("job-2", call.to_dict())
 
@@ -128,20 +128,20 @@ def sleeps(monkeypatch) -> list[float]:
 
 def test_retry_turns_off_the_sdk_retries(monkeypatch, sleeps):
     sent = _scripted(monkeypatch, [_response()])
-    completion_with_retry(model="scaleway/glm-5.2", messages=[])
+    completion_with_retry(model="scaleway/glm-5.3", messages=[])
     assert sent[0]["max_retries"] == 0
 
 
 def test_rate_limit_waits_what_the_provider_asks(monkeypatch, sleeps):
     _scripted(monkeypatch, [_rate_limit("7"), _response()])
-    completion_with_retry(retry=BACKGROUND_RETRY, model="scaleway/glm-5.2", messages=[])
+    completion_with_retry(retry=BACKGROUND_RETRY, model="scaleway/glm-5.3", messages=[])
     assert sleeps == [7]
 
 
 def test_rate_limit_gives_up_when_the_provider_asks_for_too_long(monkeypatch, sleeps):
     sent = _scripted(monkeypatch, [_rate_limit("120")])
     with pytest.raises(litellm.RateLimitError):
-        completion_with_retry(retry=INTERACTIVE_RETRY, model="scaleway/glm-5.2", messages=[])
+        completion_with_retry(retry=INTERACTIVE_RETRY, model="scaleway/glm-5.3", messages=[])
     assert len(sent) == 1 and sleeps == []
 
 
@@ -149,7 +149,7 @@ def test_rate_limit_backs_off_then_raises_once_the_budget_is_spent(monkeypatch, 
     sent = _scripted(monkeypatch, [_rate_limit()] * 7)
     logs: list[str] = []
     with pytest.raises(litellm.RateLimitError):
-        completion_with_retry(retry=BACKGROUND_RETRY, log=logs.append, model="scaleway/glm-5.2", messages=[])
+        completion_with_retry(retry=BACKGROUND_RETRY, log=logs.append, model="scaleway/glm-5.3", messages=[])
     assert len(sent) == 7
     assert sleeps == [15, 30, 60, 60, 60, 60]
     assert len(logs) == 6
@@ -158,21 +158,21 @@ def test_rate_limit_backs_off_then_raises_once_the_budget_is_spent(monkeypatch, 
 def test_timeout_is_retried_with_a_longer_timeout(monkeypatch, sleeps):
     sent = _scripted(monkeypatch, [litellm.Timeout("timeout", "m", "scaleway")] * 2)
     with pytest.raises(litellm.Timeout):
-        completion_with_retry(retry=BACKGROUND_RETRY, model="scaleway/glm-5.2", messages=[], timeout=90)
+        completion_with_retry(retry=BACKGROUND_RETRY, model="scaleway/glm-5.3", messages=[], timeout=90)
     assert [kw["timeout"] for kw in sent] == [90, 180]
     assert sleeps == []
 
 
 def test_connection_error_is_retried_after_a_pause(monkeypatch, sleeps):
     _scripted(monkeypatch, [litellm.APIConnectionError("reset", "scaleway", "m"), _response()])
-    completion_with_retry(retry=INTERACTIVE_RETRY, model="scaleway/glm-5.2", messages=[])
+    completion_with_retry(retry=INTERACTIVE_RETRY, model="scaleway/glm-5.3", messages=[])
     assert sleeps == [10]
 
 
 def test_other_errors_are_not_retried(monkeypatch, sleeps):
     sent = _scripted(monkeypatch, [litellm.BadRequestError("bad", "m", "scaleway")])
     with pytest.raises(litellm.BadRequestError):
-        completion_with_retry(model="scaleway/glm-5.2", messages=[])
+        completion_with_retry(model="scaleway/glm-5.3", messages=[])
     assert len(sent) == 1
 
 
@@ -189,7 +189,7 @@ def test_async_retry_logs_and_waits_on_the_event_loop_thread(monkeypatch):
     monkeypatch.setattr(llm_impacts, "_async_sleep", fake_async_sleep)
     asyncio.run(acompletion_with_retry(
         log=lambda _m: log_threads.append(threading.current_thread()),
-        model="scaleway/glm-5.2", messages=[],
+        model="scaleway/glm-5.3", messages=[],
     ))
     assert log_threads == sleep_threads == [threading.current_thread()]
 
@@ -198,7 +198,7 @@ def test_cancelling_the_task_cancels_a_pending_wait(monkeypatch):
     _scripted(monkeypatch, [_rate_limit("60")])
 
     async def main():
-        task = asyncio.create_task(acompletion_with_retry(model="scaleway/glm-5.2", messages=[]))
+        task = asyncio.create_task(acompletion_with_retry(model="scaleway/glm-5.3", messages=[]))
         await asyncio.sleep(0.2)  # the request failed, the 60s wait has started
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
