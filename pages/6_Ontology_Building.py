@@ -1,13 +1,22 @@
 """Ontology Building page — OLAF (MCP) + Oxigraph, driven by a tool-calling LLM agent."""
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
+from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
-from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, TEMP_GRAPH_OUTPUTS, domain_discovery_model, oxigraph_url
+from cogmaps.config import (
+    ONTOLOGY_TOOLCALL_MODELS,
+    TEMP_GRAPH_OUTPUTS,
+    domain_discovery_model,
+    oxigraph_url,
+)
 from cogmaps.core.llm_impacts import LLMCallImpact, record_llm_impacts
+from cogmaps.ontology.cleanup import ontology_ids_for
 from cogmaps.ontology.domain_discovery import (
     discover_domain,
     load_blueprint,
@@ -15,7 +24,15 @@ from cogmaps.ontology.domain_discovery import (
     save_blueprint,
     save_manual_guidelines,
 )
-from cogmaps.ontology.cleanup import ontology_ids_for
+from cogmaps.ontology.editing_agent import (
+    ChunkSources,
+    EditConversation,
+    EditTurn,
+    apply_changes,
+    olaf_for,
+    restore_and_reindex,
+)
+from cogmaps.ontology.editing_agent import ask as edit_ask
 from cogmaps.ontology.graph import build_pyvis_html
 from cogmaps.ontology.olaf_config import (
     alignment_path_for,
@@ -26,15 +43,23 @@ from cogmaps.ontology.olaf_config import (
     ontology_name_of,
     restore_oxigraph_graph,
     sanitize_ontology_id,
+    save_backup,
     ttl_path_for,
 )
 from cogmaps.ontology.prompts import format_domain_guidelines
-from cogmaps.ontology.runner import OntologyJobRunner, build_domain_mode, build_seed_ids
+from cogmaps.ontology.runner import (
+    OntologyJobRunner,
+    build_domain_mode,
+    build_seed_ids,
+    chunk_collections_for,
+    final_export,
+)
 from cogmaps.ontology.seeds import list_seeds
 from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import check_password, is_admin, list_visible_collections
 from cogmaps.ui.components import (
     empty_state,
+    get_embedder,
     ontology_job_store,
     render_llm_impacts_footer,
     render_sidebar,
@@ -132,17 +157,21 @@ _ontology_choice = st.radio(
     help="Each ontology of the collection is built separately — its own graph, and its own progress "
          "through the chunks. Create a new one to build another version from the same documents.",
 )
-_NEW_MODES = {"build": "from documents", "merge": "by merging two ontologies"}
+_NEW_MODES = {
+    "build": "from documents", "merge": "by merging two ontologies", "edit": "by editing an existing one (chat)",
+}
 _new_mode = "build"
 if _ontology_choice == _NEW_ONTOLOGY:
     _new_mode = st.radio(
         "create it", list(_NEW_MODES), format_func=_NEW_MODES.get, horizontal=True,
         key=f"new_ontology_mode_{qdrant_col}",
-        help="Build it from this collection's documents, or merge two existing ontologies into it — "
-             "e.g. two built from different collections.",
+        help="Build it from this collection's documents, merge two existing ontologies into it — "
+             "e.g. two built from different collections —, or copy an existing one and modify it by "
+             "chatting with an agent (the original is left unchanged).",
     )
     _new_name = st.text_input(
-        "new ontology name", placeholder="e.g. v2, legal…" if _new_mode == "build" else "e.g. merged…",
+        "new ontology name",
+        placeholder={"build": "e.g. v2, legal…", "merge": "e.g. merged…", "edit": "e.g. reviewed…"}[_new_mode],
         key=f"new_ontology_name_{qdrant_col}",
         help="Letters and digits; other characters become '_'.",
     )
@@ -151,9 +180,9 @@ if _ontology_choice == _NEW_ONTOLOGY:
         st.info("Name the new ontology to create it.")
         st.stop()
     if ontology_id in _ontology_ids:
-        if _new_mode == "merge":
+        if _new_mode in ("merge", "edit"):
             st.warning(f"The collection already has an ontology named “{ontology_name_of(qdrant_col, ontology_id)}”: "
-                       "merge into a new one.")
+                       f"{'merge' if _new_mode == 'merge' else 'copy'} into a new one.")
             st.stop()
         st.warning(f"The collection already has an ontology named “{ontology_name_of(qdrant_col, ontology_id)}”: "
                    "a build will extend it.")
@@ -169,9 +198,9 @@ filenames = sorted(store.existing_filenames(qdrant_col))
 
 # ── Job helpers ───────────────────────────────────────────────────────
 
-# Builds, merges and reasoning runs each have their own active job, shown in their own
-# section of the page: "build" or "merge" above the results, "reasoning" in the Reasoning section.
-_JOB_KINDS = {"build": "ontology build", "merge": "merge", "reasoning": "reasoning"}
+# Builds, merges, copies to edit and reasoning runs each have their own active job, shown in their
+# own section of the page: "build", "merge" or "edit" above the results, "reasoning" in the Reasoning section.
+_JOB_KINDS = {"build": "ontology build", "merge": "merge", "edit": "copy", "reasoning": "reasoning"}
 
 
 def _active_job_key(job_type: str) -> str:
@@ -299,7 +328,8 @@ def _render_job_status(job_type: str) -> None:
             _render_merge_result(job["result"] or {})
     elif status == "failed":
         st.error(f"{_JOB_KINDS[job_type].capitalize()} failed — see the log above."
-                 + (" Delete this ontology from /manage/ to merge again." if job_type == "merge" else ""))
+                 + (" Delete this ontology from /manage/ to merge again." if job_type == "merge" else "")
+                 + (" Delete this ontology from /manage/ to copy again." if job_type == "edit" else ""))
 
     # Once per job, refresh the results section when it ends: the ontology changed. Only
     # for a job watched while it ran — not for an old run shown again after a reload.
@@ -626,11 +656,234 @@ def _render_merge_info(job: dict) -> None:
         _render_job_status("merge")
 
 
+# ── Edit (copy + chat) ─────────────────────────────────────────────────
+
+def _render_edit_form() -> None:
+    """Pick the ontology to copy into the new one, and launch the copy."""
+    sources = [oid for oid in _source_ontologies if oid != ontology_id]
+    if not sources:
+        empty_state("✏️", "Editing needs a built ontology to start from — build one first.")
+        return
+    source = st.selectbox(
+        "ontology to start from", sources, format_func=_ontology_label, key=f"edit_source_{ontology_id}",
+        help="Copied into the new ontology with its source chunks and semantic index; left unchanged itself.",
+    )
+    st.caption(
+        "The ontology is copied, then you modify the copy by chatting with an agent: ask it for a review or "
+        "for changes. It proposes each change with its reason, grounded in the source chunks; you pick the "
+        "ones to apply. Changes keep the links to the source chunks and the semantic search up to date."
+    )
+    if st.button("▶ create the copy", type="primary"):
+        job_id = str(uuid.uuid4())
+        source_collection = _source_ontologies[source]
+        ontology_job_store().create_job(
+            job_id=job_id,
+            collection=qdrant_col,
+            ontology_id=ontology_id,
+            doc_filenames=[],
+            llm_provider="",
+            llm_model="",
+            job_type="edit",
+            options={
+                "source": source, "source_collection": source_collection,
+                "seed_ids": build_seed_ids(ontology_job_store(), source_collection, source),
+            },
+        )
+        _ontology_job_runner(sb.qdrant_host, sb.qdrant_port).submit(job_id)
+        _activate_job(job_id, "edit")
+        st.session_state[f"{_ontology_key}_next"] = ontology_id
+        st.rerun()
+
+
+_CHANGE_ICONS = {"proposed": "•", "applied": "✅", "failed": "❌", "discarded": "—", "undone": "↺"}
+
+
+def _write_ttl_file(turtle: str) -> None:
+    """Keep the on-disk fallback copy of the ontology in step with Oxigraph."""
+    path = ttl_path_for(qdrant_col, ontology_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(turtle)
+
+
+def _apply_turn(conversation: EditConversation, turn: EditTurn, selected: list[int], job_id: str, model: str) -> None:
+    """Back the ontology up, then apply the selected proposals through OLAF."""
+    qdrant_url = f"http://{sb.qdrant_host}:{sb.qdrant_port}"
+    with st.status("applying the changes…", expanded=True) as status:
+        try:
+            before = export_oxigraph_ontology_ttl(ontology_id, oxigraph_url())
+            if not has_ontology_content(before):
+                raise RuntimeError("could not read the ontology from Oxigraph to back it up")
+            turn.backup_path = str(save_backup(qdrant_col, ontology_id, before))
+
+            async def run() -> list:
+                async with olaf_for(qdrant_url=qdrant_url, collection=qdrant_col, ontology_id=ontology_id,
+                                    seed_ids=build_seed_ids(ontology_job_store(), qdrant_col, ontology_id),
+                                    log=status.write) as session:
+                    done = await apply_changes(session, conversation, turn, selected, log=status.write)
+                    await final_export(session, ontology_id, export_cb=_write_ttl_file, log=status.write)
+                    return done
+
+            done = asyncio.run(run())
+        except Exception as e:  # noqa: BLE001
+            status.update(label="apply failed", state="error")
+            st.error(f"Applying the changes failed: {e}")
+            return
+        for change in done:
+            ontology_job_store().append_log(job_id, f"[chat edit, {model}] {change.as_note()}")
+        status.update(label="changes applied", state="complete")
+    _oxigraph_ttl.clear()
+    st.rerun()
+
+
+def _undo_turn(conversation: EditConversation, turn: EditTurn, job_id: str) -> None:
+    """Put the ontology back as it was before the turn's changes: graph and semantic index."""
+    with st.spinner("restoring the ontology and rebuilding its semantic index…"):
+        try:
+            backup = Path(turn.backup_path).read_text(encoding="utf-8")
+            restore_and_reindex(qdrant_url=f"http://{sb.qdrant_host}:{sb.qdrant_port}", collection=qdrant_col,
+                                ontology_id=ontology_id, ttl=backup)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Undo failed: {e}")
+            return
+    _write_ttl_file(backup)
+    for change in turn.changes:
+        if change.status == "applied":
+            change.status = "undone"
+    turn.backup_path = None
+    conversation.pending_note = (
+        "[The user undid the changes applied after your previous turn: the ontology is back as it was "
+        "before them.]"
+    )
+    ontology_job_store().append_log(job_id, f"[chat edit] changes of “{turn.request[:80]}” undone.")
+    _oxigraph_ttl.clear()
+    st.rerun()
+
+
+def _render_turn_changes(conversation: EditConversation, turn: EditTurn, i: int, job_id: str,
+                         model: str, busy: bool) -> None:
+    last = i == len(conversation.turns) - 1
+    if turn.pending and last:
+        st.markdown(f"**{len(turn.pending)} proposed change(s)** — pick those to apply:")
+        rows = [{"apply": True, "#": c.id, "change": c.describe(), "reason": c.reason} for c in turn.pending]
+        edited = st.data_editor(
+            pd.DataFrame(rows), hide_index=True, use_container_width=True, key=f"edit_pick_{ontology_id}_{i}",
+            disabled=["#", "change", "reason"],
+            column_config={"apply": st.column_config.CheckboxColumn(width="small")},
+        )
+        selected = [int(i) for i in edited.loc[edited["apply"], "#"]]
+        col_a, col_d = st.columns(2)
+        if col_a.button(f"✅ apply {len(selected)} change(s)", type="primary", disabled=busy or not selected,
+                        use_container_width=True, key=f"edit_apply_{ontology_id}_{i}",
+                        help="A job is running on this ontology." if busy else None):
+            _apply_turn(conversation, turn, selected, job_id, model)
+        if col_d.button("✗ discard all", use_container_width=True, key=f"edit_discard_{ontology_id}_{i}"):
+            conversation.settle()
+            st.rerun()
+        return
+    rows = [
+        {"": _CHANGE_ICONS.get(c.status, "·"), "#": c.id, "change": c.describe(), "status": c.status,
+         "result": c.result, "reason": c.reason}
+        for c in turn.changes
+    ]
+    st.dataframe(rows, hide_index=True, use_container_width=True)
+    later_applied = any(t.backup_path for t in conversation.turns[i + 1:])
+    if turn.backup_path and not later_applied and st.button(
+        "↺ undo these changes", disabled=busy, key=f"edit_undo_{ontology_id}_{i}",
+        help="Restores the ontology as it was before them, and rebuilds its semantic index.",
+    ):
+        _undo_turn(conversation, turn, job_id)
+
+
+def _render_edit_chat(job_id: str) -> None:
+    """The conversation with the editing agent: requests, proposals to validate, results."""
+    conversations = st.session_state.setdefault("ontology_edit", {})
+    conversation: EditConversation = conversations.setdefault(ontology_id, EditConversation(ontology_id))
+    latest = ontology_job_store().latest_job_for(qdrant_col, ontology_id=ontology_id)
+    busy = latest is not None and latest["status"] in ("running", "pending")
+
+    st.markdown("##### 💬 Edit with the agent")
+    col_m, col_r = st.columns([3, 1])
+    with col_m:
+        model = st.selectbox("model (tool-calling)", ONTOLOGY_TOOLCALL_MODELS, key="edit_model")
+    with col_r:
+        st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
+        if st.button("↺ new conversation", disabled=not conversation.turns, use_container_width=True,
+                     key=f"edit_reset_{ontology_id}"):
+            conversation.reset()
+            st.rerun()
+    if not conversation.turns:
+        st.caption(
+            "E.g. “review the class hierarchy and point out what looks wrong”, “merge Vehicle and Car”, "
+            "“the definition of X is too vague — rewrite it from the sources”, “add that a contract is signed "
+            "by a party”. The agent proposes; nothing changes until you apply."
+        )
+
+    for i, turn in enumerate(conversation.turns):
+        with st.chat_message("user"):
+            st.write(turn.request)
+        with st.chat_message("assistant"):
+            st.markdown(turn.answer or "_(empty answer)_")
+            if turn.changes:
+                _render_turn_changes(conversation, turn, i, job_id, model, busy)
+            if turn.tool_log:
+                with st.expander(f"what the agent looked at ({len(turn.tool_log)} tool calls)"):
+                    st.code("\n".join(turn.tool_log), language=None)
+
+    request = st.chat_input("ask for a review or a change…", key=f"edit_ask_{ontology_id}")
+    if not request:
+        return
+    if not sb.scaleway_api_key:
+        st.warning("Set SCALEWAY_API_KEY to use the editing agent (Scaleway tool-calling only).")
+        return
+    with st.chat_message("user"):
+        st.write(request)
+    with st.status("reviewing the ontology…", expanded=True) as status:
+        qdrant_url = f"http://{sb.qdrant_host}:{sb.qdrant_port}"
+        sources = ChunkSources(
+            store.client, chunk_collections_for(ontology_job_store(), qdrant_col, ontology_id),
+            get_embedder(sb.selected_device).encode_query,
+        )
+
+        async def run() -> None:
+            async with olaf_for(qdrant_url=qdrant_url, collection=qdrant_col, ontology_id=ontology_id,
+                                seed_ids=build_seed_ids(ontology_job_store(), qdrant_col, ontology_id),
+                                log=status.write) as session:
+                await edit_ask(session, conversation, request, sources=sources, model=model,
+                               api_key=sb.scaleway_api_key, log=status.write)
+
+        try:
+            with record_llm_impacts(session_llm_calls("ontology_building").append):
+                asyncio.run(run())
+        except Exception as e:  # noqa: BLE001
+            status.update(label="failed", state="error")
+            st.error(f"The editing agent failed: {e}")
+            return
+        status.update(label="done", state="complete")
+    st.rerun()
+
+
+def _render_edit_info(job: dict) -> None:
+    """An edited ontology: where it was copied from, the copy run, and the chat to modify it."""
+    with st.container(border=True):
+        st.markdown("#### ✏️ Edited ontology")
+        st.caption(f"Copy of **{_ontology_label(job['options']['source'])}**, modified in the chat below. "
+                   "Not extended by builds: also refine it with the reasoning below.")
+        _render_job_status("edit")
+        if job["status"] == "done":
+            _render_edit_chat(job["id"])
+
+
 _merge_job = ontology_job_store().latest_job_for(qdrant_col, "merge", ontology_id)
+_edit_job = ontology_job_store().latest_job_for(qdrant_col, "edit", ontology_id)
 if _ontology_choice == _NEW_ONTOLOGY and _new_mode == "merge":
     _render_merge_form()
+elif _ontology_choice == _NEW_ONTOLOGY and _new_mode == "edit":
+    _render_edit_form()
 elif _merge_job:
     _render_merge_info(_merge_job)
+elif _edit_job:
+    _render_edit_info(_edit_job)
 else:
     _render_build()
 
@@ -731,7 +984,7 @@ def _render_reasoning() -> None:
 
         backups = list_backups(qdrant_col, ontology_id)
         if backups:
-            with st.expander(f"backups before reasoning ({len(backups)})"):
+            with st.expander(f"backups before reasoning or chat edits ({len(backups)})"):
                 labels = {
                     f"{b.stem[:4]}-{b.stem[4:6]}-{b.stem[6:8]} {b.stem[9:11]}:{b.stem[11:13]}:{b.stem[13:15]}": b
                     for b in backups
