@@ -357,9 +357,17 @@ with tab_browse:
             empty_state("🧬", "This ontology graph is empty.")
         else:
             try:
-                st.components.v1.html(build_explorer_html(ttl, title=ontology_label), height=850)
+                explorer_html = build_explorer_html(ttl, title=ontology_label)
             except Exception as e:  # noqa: BLE001
                 st.error(f"Could not render the graph view: {e}")
+            else:
+                st.components.v1.html(explorer_html, height=850)
+                # The same standalone page (search, 1-/2-hop focus…) to open in a browser;
+                # vis-network and the fonts load from their CDNs, so it needs internet access.
+                st.download_button(
+                    "⬇ download interactive view (.html)", explorer_html.encode("utf-8"),
+                    file_name=f"{ontology_id}_explorer.html", mime="text/html",
+                )
 
             with st.expander("raw Turtle"):
                 st.code(ttl, language="turtle")
