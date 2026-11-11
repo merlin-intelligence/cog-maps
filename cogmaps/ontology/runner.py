@@ -9,6 +9,7 @@ generated for that job's collection/ontology.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import queue
 import shutil
@@ -21,7 +22,7 @@ from qdrant_client import models
 
 from cogmaps.config import domain_discovery_model, oxigraph_url, scaleway_api_key
 from cogmaps.core.llm_impacts import record_llm_impacts
-from cogmaps.ontology.agent import run_build
+from cogmaps.ontology.agent import run_build, select_seeds
 from cogmaps.ontology.domain_discovery import (
     DomainBlueprint,
     discover_domain,
@@ -47,7 +48,9 @@ from cogmaps.ontology.seeds import ensure_ontology_index
 from cogmaps.ontology.store import OntologyJobStore
 from cogmaps.qdrant.store import QdrantStore
 
-__all__ = ["OntologyJobRunner", "build_domain_mode", "build_seed_ids", "final_export", "ttl_path_for"]
+__all__ = [
+    "OntologyJobRunner", "build_domain_mode", "build_seed_ids", "chunk_collections_for", "final_export", "ttl_path_for",
+]
 
 
 def migrate_shared_chunk_status(client, collection: str) -> int:
@@ -129,11 +132,31 @@ def build_domain_mode(store: OntologyJobStore, collection: str, ontology_id: str
 
 def build_seed_ids(store: OntologyJobStore, collection: str, ontology_id: str) -> list[str]:
     """The seeds selected for the ontology's latest build — those it reuses terms from. For a
-    merged ontology, those of its two sources."""
-    job = store.latest_job_for(collection, "build", ontology_id) or store.latest_job_for(
-        collection, "merge", ontology_id,
-    )
+    merged ontology, those of its two sources; for an edited copy, those of its source."""
+    job = next((j for job_type in ("build", "merge", "edit")
+                if (j := store.latest_job_for(collection, job_type, ontology_id))), None)
     return job["options"].get("seed_ids", []) if job else []
+
+
+def chunk_collections_for(store: OntologyJobStore, collection: str, ontology_id: str) -> list[str]:
+    """The Qdrant collections the ontology's source chunks are in: its own collection for a built
+    one, its sources' for a merged one or an edited copy (followed back through their own sources)."""
+    seen: set[tuple[str, str]] = set()
+
+    def walk(coll: str, oid: str) -> list[str]:
+        if (coll, oid) in seen:
+            return []
+        seen.add((coll, oid))
+        if job := store.latest_job_for(coll, "merge", oid):
+            o = job["options"]
+            return [*walk(o.get("reference_collection") or coll, o["reference"]),
+                    *walk(o.get("other_collection") or coll, o["other"])]
+        if job := store.latest_job_for(coll, "edit", oid):
+            o = job["options"]
+            return walk(o.get("source_collection") or coll, o["source"])
+        return [coll]
+
+    return list(dict.fromkeys(walk(collection, ontology_id)))
 
 
 class OntologyJobRunner:
@@ -191,6 +214,9 @@ class OntologyJobRunner:
             return
         if job.get("job_type") == "merge":
             await self._run_merge(job, log, set_progress)
+            return
+        if job.get("job_type") == "edit":
+            await self._run_edit_copy(job, log)
             return
         config_dir = tempfile.mkdtemp(prefix=f"cogmaps_olaf_{job_id}_")
         try:
@@ -336,6 +362,28 @@ class OntologyJobRunner:
         finally:
             shutil.rmtree(config_dir, ignore_errors=True)
 
+    async def _run_edit_copy(self, job: dict, log: Callable[[str], None]) -> None:
+        """Copy the job's source ontology into its (new, empty) ontology, to be edited in the chat:
+        provenance included, and the copy indexed for semantic search."""
+        job_id, collection, options = job["id"], job["collection"], job["options"]
+        config_dir = tempfile.mkdtemp(prefix=f"cogmaps_olaf_{job_id}_")
+        try:
+            self._write_config(config_dir, job)
+            log(f"Starting OLAF: copy of {options['source']!r} into ontology_id={job['ontology_id']!r}")
+            async with olaf_session(config_dir) as session:
+                await select_seeds(session, options.get("seed_ids", []), log)
+                summary = await copy_ontology(session, job["ontology_id"], options["source"], log)
+                await final_export(session, job["ontology_id"], export_cb=_ttl_writer(collection, job["ontology_id"]),
+                                   log=log)
+            self.store.set_result(job_id, summary)
+            self.store.set_status(job_id, "done")
+            log("Copy done — edit it in the chat below.")
+        except Exception as e:  # noqa: BLE001
+            self.store.set_status(job_id, "failed")
+            log(f"Fatal: {e}\n{traceback.format_exc()}")
+        finally:
+            shutil.rmtree(config_dir, ignore_errors=True)
+
     def _write_config(self, config_dir: str, job: dict) -> None:
         """Write the OLAF ``config.toml`` for this job's collection/ontology into ``config_dir``."""
         write_config(
@@ -345,6 +393,32 @@ class OntologyJobRunner:
             ontology_id=job["ontology_id"],
             ontology_name=ontology_display_name(job["collection"], job["ontology_id"]),
         )
+
+
+async def copy_ontology(session, ontology_id: str, source_id: str, log: Callable[[str], None]) -> dict:
+    """Import ``source_id`` into the session's (empty) ontology. Returns the triples and entities copied."""
+    async def call(tool: str, args: dict | None = None) -> str:
+        res = await session.call_tool(tool, args or {})
+        text = res.content[0].text if res.content else ""
+        if text.startswith("Error"):
+            raise RuntimeError(f"{tool} failed: {text}")
+        return text
+
+    if source_id not in {o["id"] for o in json.loads(await call("ontology_list"))}:
+        raise RuntimeError(f"Ontology not found: {source_id}.")
+    has_content = json.loads(await call("sparql_query", {"query": f"""
+        PREFIX owl: <http://www.w3.org/2002/07/owl#>
+        ASK {{ GRAPH <urn:olaf:{ontology_id}> {{
+            ?e a ?t . VALUES ?t {{ owl:Class owl:NamedIndividual owl:ObjectProperty owl:DatatypeProperty }}
+        }} }}"""}))
+    if has_content.get("boolean"):
+        raise RuntimeError(f"The ontology '{ontology_id}' already has content: copy into a new one.")
+    result = json.loads(await call("ontology_import", {"source_ontology_id": source_id}))
+    if warning := result.get("warning"):
+        log(f"Warning: {warning} — semantic search on the copy may be incomplete.")
+    log(f"Copied '{source_id}': {result['triples']} triples, {len(result['entities'])} entities "
+        "(with their source chunks).")
+    return {"triples": result["triples"], "entities": len(result["entities"])}
 
 
 def _ttl_writer(collection: str, ontology_id: str) -> Callable[[str], None]:

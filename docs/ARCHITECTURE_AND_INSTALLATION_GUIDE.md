@@ -169,7 +169,7 @@ OLLAMA_HOST=http://localhost:11434   # default; override if Ollama runs elsewher
 # OLLAMA_MODELS=qwen2.5:7b           # optional fallback list if the server can't be queried
 ```
 
-With **Scaleway**, an answer is capped at `CHAT_MAX_TOKENS` tokens (default 8192). Reasoning models (GLM, Kimi, gpt-oss) count their hidden reasoning against that budget — raise it in `.env` if answers come back truncated. Only the final answer is shown, with either backend: reasoning returned in a separate field is logged at `DEBUG` level, and inline `<think>…</think>` blocks (DeepSeek-R1, Qwen3… on Ollama) are stripped.
+With **Scaleway**, an answer is capped at `CHAT_MAX_TOKENS` tokens (default 8192) — also each reply of the ontology editing agent (see *Editing an ontology in a chat*). Reasoning models (GLM, Kimi, gpt-oss) count their hidden reasoning against that budget — raise it in `.env` if answers come back truncated. Only the final answer is shown, with either backend: reasoning returned in a separate field is logged at `DEBUG` level, and inline `<think>…</think>` blocks (DeepSeek-R1, Qwen3… on Ollama) are stripped.
 
 When **Ollama** is selected, the model dropdown is populated automatically from the models installed on the server (`ollama list`). Pull at least one first, e.g. `ollama pull qwen2.5:7b`, and make sure the server is running (`ollama serve`).
 
@@ -473,6 +473,44 @@ chunks of either source); the page shows its merge report instead, and the
 reasoning — with the seeds of both sources — catches the remaining duplicates
 and fixes what the merge brought to light.
 
+#### Editing an ontology in a chat
+
+Under **+ new ontology**, *create it by editing an existing one (chat)* copies an
+ontology into the new one — an `edit` job, `ontology_import`: every triple,
+provenance included, re-indexed for semantic search; the source is unchanged —
+then the copy is modified in a chat with `cogmaps.ontology.editing_agent`:
+
+- The agent reads the ontology with OLAF's read tools, and the source chunks with
+  `source_read` / `source_search`, which read Qdrant directly: a copied or merged
+  ontology's chunks can be in other collections than its own
+  (`runner.chunk_collections_for` follows copies and merges back to them).
+- It cannot write: OLAF's write tools are offered as `propose_<tool>`, checked
+  against OLAF's schema and recorded with a reason. The page lists the proposals;
+  the user picks those to apply.
+- Applied changes go through OLAF's own tools, which keep provenance and the
+  semantic index in step (`concept_update` keeps the sources and re-indexes,
+  `concept_merge` carries the sources over…). OLAF has no tool to change a
+  relation in place, so `relation_replace` reads its source chunks
+  (`relation_sources`), deletes it and adds the new one with the same chunks —
+  the old one is put back if that fails. A new entity or relation gets the chunk
+  the agent found for it, or none when nothing in the sources supports it.
+- The ontology is backed up before each applied batch (with the reasoning's
+  backups), and the last batch can be undone: the graph is restored and the
+  semantic index rebuilt (`olaf reindex`). Applied changes are also written to
+  the `edit` job's log.
+- A turn is bounded: at most 20 LLM ↔ tool rounds; after 10 without any
+  proposal the agent is told to propose from what it has read, and to propose
+  about 10 changes at most per turn — a broad review goes on over several
+  turns ("go on"). Each LLM reply is capped at `CHAT_MAX_TOKENS` (default 8192):
+  reasoning models (GLM…) count their thinking against it, and on a broad
+  request can use it all before writing anything. Such an empty reply is
+  retried once ("answer now"); a second one shows an explicit message in the
+  chat — make the request narrower, raise `CHAT_MAX_TOKENS`, or pick another
+  model. Expect one to a few minutes per turn; the tool calls show live.
+- The conversation lives in the browser session (a reload starts a new one —
+  the job log keeps what was applied). `concept_merge` clears the materialized
+  inferences: run the reasoning again after merges.
+
 #### Domain discovery (optional)
 
 A *domain blueprint* tailors the build agent's system prompt to the corpus: an
@@ -611,7 +649,7 @@ Eigenmind is optimized to run on resource-constrained environments (e.g., 4GB RA
 
 ### 1. Memory Management
 - **Shared Model Cache**: The SentenceTransformer is loaded once on first use via `@st.cache_resource` (see `get_embedder()` in `cogmaps/ui/components.py`) and kept resident in the Streamlit server process. The same ~300 MB instance is reused across **all sessions and all users** for search, analysis, **and background ingestion jobs** — no per-request reload, no per-job copy, so a running ingestion never doubles GPU/CPU memory usage against a concurrent chat session. Concurrent calls into the shared instance are serialized internally (a `threading.Lock` around `encode*`), so ingestion and chat queue up rather than racing. The cache is released only when the process exits (e.g. `systemctl restart cogmaps`).
-- **Ontology builds and searches**: each `/build ontology/` job, and each question asked on `/explore ontology/`, runs OLAF in its own subprocess, which loads a second copy of the embedding model (ONNX, ~1.1 GB) for its duration — budget for it on small VMs.
+- **Ontology builds and searches**: each `/build ontology/` job, each message of the editing chat, and each question asked on `/explore ontology/`, runs OLAF in its own subprocess, which loads a second copy of the embedding model (ONNX, ~1.1 GB) for its duration — budget for it on small VMs.
 - **CLI Ingestion**: The `cogmaps-ingest` CLI is a separate, single-run process and still uses its own scoped `EmbeddingModel` (loaded at start, released at exit via `with EmbeddingModel(...)`) — there's no long-lived cache to share outside the Streamlit process.
 - **CPU-First**: By default, the app uses CPU-only PyTorch to ensure stability and avoid GPU-related memory overhead on low-end systems. CUDA / MPS are auto-detected when available.
 
@@ -661,7 +699,7 @@ Navigate between pages from the Streamlit sidebar:
 | `pages/3_Chat.py`           | `/ask/` - Hybrid RAG question answering against a selected collection |
 | `pages/4_Graph_Explorer.py` | `/explore graphs/` - Subgraph view (Spectral Attention / Semantic Bridge / Supported Diversity nodes) |
 | `pages/5_Ontology_Explorer.py` | `/explore ontology/` - Ask questions over an ontology (search agent + subgraph + source chunks), browse it graphically, run read-only SPARQL queries, load seed ontologies (admins) |
-| `pages/6_Ontology_Building.py` | `/build ontology/` - Construct an OWL/RDFS ontology from selected documents via OLAF + Oxigraph |
+| `pages/6_Ontology_Building.py` | `/build ontology/` - Construct an OWL/RDFS ontology from selected documents via OLAF + Oxigraph, merge two ontologies, or edit a copy of one in a chat with an agent (proposals validated by the user); reasoning |
 | `pages/7_Manage.py`         | `/manage/` - List & delete documents per ingestion date; delete collections/ontologies/seeds |
 
 ### Collection visibility
