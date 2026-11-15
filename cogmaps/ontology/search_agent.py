@@ -28,6 +28,7 @@ from qdrant_client import QdrantClient
 
 from cogmaps.config import oxigraph_url, qdrant_api_key
 from cogmaps.core.llm_impacts import INTERACTIVE_RETRY, acompletion_with_retry
+from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.agent import compact_history, mcp_tools_to_litellm, summarise_args
 from cogmaps.ontology.mcp_client import olaf_session
 from cogmaps.ontology.olaf_config import build_config_toml, ontology_display_name
@@ -221,6 +222,8 @@ async def _run_loop(
         # Earlier questions' chunk texts and SPARQL rows stay in the history — shrink them.
         compact_history(messages)
         msg = (await complete("auto")).choices[0].message
+        if recovered := recover_text_tool_calls(msg):
+            log(f"Recovered {recovered} tool call(s) the model wrote as text.")
 
         if not msg.tool_calls:
             answer = msg.content or ""

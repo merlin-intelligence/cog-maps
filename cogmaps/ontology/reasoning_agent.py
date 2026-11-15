@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from mcp import ClientSession
 
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
+from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.agent import mcp_tools_to_litellm, select_seeds
 from cogmaps.ontology.olaf_config import has_ontology_content
 from cogmaps.ontology.reasoning_prompts import (
@@ -295,6 +296,8 @@ class ReasoningAgent:
                 timeout=120,
             )
             msg = response.choices[0].message
+            if recovered := recover_text_tool_calls(msg):
+                self.log(f"[{label}] recovered {recovered} tool call(s) the model wrote as text.")
             text = strip_reasoning(msg.content or "")
 
             if not msg.tool_calls:

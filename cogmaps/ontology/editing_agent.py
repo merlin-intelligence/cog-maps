@@ -41,6 +41,7 @@ from qdrant_client import QdrantClient
 
 from cogmaps.config import chat_max_tokens, qdrant_api_key
 from cogmaps.core.llm_impacts import INTERACTIVE_RETRY, acompletion_with_retry
+from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.agent import (
     compact_history,
     mcp_tools_to_litellm,
@@ -385,6 +386,8 @@ async def _run_loop(
         compact_history(messages)
         choice = (await complete("auto")).choices[0]
         msg = choice.message
+        if recovered := recover_text_tool_calls(msg):
+            log(f"Recovered {recovered} tool call(s) the model wrote as text.")
         if not msg.tool_calls:
             if text := strip_reasoning(msg.content or "").strip():
                 return text

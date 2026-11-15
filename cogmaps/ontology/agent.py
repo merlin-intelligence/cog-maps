@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from mcp import ClientSession
 
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
+from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.olaf_config import has_ontology_content
 from cogmaps.ontology.prompts import build_system_prompt
 
@@ -341,6 +342,8 @@ async def run_build(
         )
 
         msg = response.choices[0].message
+        if recovered := recover_text_tool_calls(msg):
+            log(f"Recovered {recovered} tool call(s) the model wrote as text.")
 
         if not msg.tool_calls:
             if msg.content:
