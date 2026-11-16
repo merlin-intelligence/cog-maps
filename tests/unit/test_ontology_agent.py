@@ -148,6 +148,25 @@ def test_run_build_accepts_stop_when_nothing_is_pending_even_after_seed_export(m
     assert len(sent) == 2
 
 
+def test_run_build_runs_tool_calls_written_as_text_without_nudging(monkeypatch):
+    # GLM 5.3 sometimes writes the call in content with a wrong closing tag, so the
+    # server leaves tool_calls empty: it must be run, not taken for a stop.
+    chunks = _PendingChunks(["c1"])
+    sent = _script_completions(monkeypatch, [
+        _text_response('<tool_call>\n{"name": "chunk_mark_processed", "arguments": {"chunk_id": "c1"}}\n<tool_call>'),
+        _text_response("All done."),
+    ])
+    session = _FakeSession({"chunk_list": chunks.chunk_list, "chunk_mark_processed": chunks.chunk_mark_processed})
+    _, logs = _run(session)
+
+    assert ("chunk_mark_processed", {"chunk_id": "c1"}) in session.calls
+    assert not any(line.startswith("Nudging") for line in logs)
+    assert any("Recovered 1 tool call" in line for line in logs)
+    assistant = sent[1][-2]
+    assert assistant["tool_calls"][0]["function"]["name"] == "chunk_mark_processed"
+    assert sent[1][-1]["role"] == "tool"
+
+
 def test_run_build_gives_up_after_max_consecutive_nudges(monkeypatch):
     n = agent_mod.MAX_CONSECUTIVE_NUDGES
     sent = _script_completions(monkeypatch, [_text_response("stop")] * (n + 1))
