@@ -233,10 +233,12 @@ def test_provider_completion_kwargs_routes_scaleway_and_mistral(monkeypatch):
     assert provider_completion_kwargs("mistral/mistral-large-4", "m-k") == {
         "model": "mistral/mistral-large-4",
         "api_key": "m-k",
+        "top_p": 1.0,
     }
     monkeypatch.setenv("MISTRAL_API_BASE_URL", "https://custom.mistral.example/v1/chat/completions")
     assert provider_completion_kwargs("mistral/mistral-large-4", "m-k") == {
         "model": "mistral/mistral-large-4",
         "api_key": "m-k",
+        "top_p": 1.0,
         "api_base": "https://custom.mistral.example/v1",
     }

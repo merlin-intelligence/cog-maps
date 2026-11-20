@@ -266,11 +266,18 @@ def api_base_for_model(model: str) -> str | None:
 
 
 def provider_completion_kwargs(model: str, api_key: str) -> dict:
-    """Provider routing kwargs (``model``, ``api_key``, optional ``api_base``) for LiteLLM."""
+    """Provider routing kwargs (``model``, ``api_key``, optional ``api_base``/``top_p``) for LiteLLM.
+
+    Mistral's ``mistral-large-4`` defaults ``top_p`` below 1 server-side and rejects
+    ``temperature=0`` (greedy sampling) with HTTP 400 code 3054 unless ``top_p=1.0``
+    is passed explicitly.
+    """
     kwargs: dict = {
         "model": litellm_model_name(model),
         "api_key": api_key,
     }
+    if model_provider(model) == "mistral":
+        kwargs["top_p"] = 1.0
     if api_base := api_base_for_model(model):
         kwargs["api_base"] = api_base
     return kwargs
