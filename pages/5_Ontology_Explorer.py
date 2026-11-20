@@ -10,7 +10,7 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, oxigraph_url
+from cogmaps.config import ONTOLOGY_TOOLCALL_MODELS, model_provider, oxigraph_url
 from cogmaps.core.llm_impacts import record_llm_impacts
 from cogmaps.ontology.explorer_view import build_explorer_html
 from cogmaps.ontology.graph import build_pyvis_html, extract_subgraph
@@ -323,8 +323,10 @@ with tab_ask:
 
     question = st.chat_input("ask a question about this ontology…", key=f"ask_{ontology_id}")
     if question:
-        if not sb.scaleway_api_key:
-            st.warning("Set a Scaleway API key in the sidebar to use the search agent.")
+        _search_api_key = sb.mistral_api_key if model_provider(model) == "mistral" else sb.scaleway_api_key
+        if not _search_api_key:
+            _key_env = "MISTRAL_API_KEY" if model_provider(model) == "mistral" else "SCALEWAY_API_KEY"
+            st.warning(f"Set {_key_env} to use the search agent with `{model}`.")
         else:
             with st.chat_message("user"):
                 st.write(question)
@@ -334,7 +336,7 @@ with tab_ask:
                         turn = asyncio.run(ask_collection(
                             conversation, question,
                             qdrant_url=f"http://{sb.qdrant_host}:{sb.qdrant_port}",
-                            collection=qdrant_col, model=model, api_key=sb.scaleway_api_key,
+                            collection=qdrant_col, model=model, api_key=_search_api_key,
                             log=status.write,
                         ))
                     status.write("Building the answer's subgraph…")

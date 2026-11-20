@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp import ClientSession
 
+from cogmaps.config import provider_completion_kwargs
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
 from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.olaf_config import has_ontology_content
@@ -326,8 +327,7 @@ async def run_build(
         response = await acompletion_with_retry(
             retry=BACKGROUND_RETRY,
             log=log,
-            model=f"scaleway/{model}",
-            api_key=api_key,
+            **provider_completion_kwargs(model, api_key),
             messages=messages,
             tools=tools,
             tool_choice="auto",

@@ -26,7 +26,7 @@ from typing import Any
 from mcp import ClientSession
 from qdrant_client import QdrantClient
 
-from cogmaps.config import oxigraph_url, qdrant_api_key
+from cogmaps.config import oxigraph_url, provider_completion_kwargs, qdrant_api_key
 from cogmaps.core.llm_impacts import INTERACTIVE_RETRY, acompletion_with_retry
 from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.agent import compact_history, mcp_tools_to_litellm, summarise_args
@@ -203,8 +203,7 @@ async def _run_loop(
         return await acompletion_with_retry(
             retry=INTERACTIVE_RETRY,
             log=log,
-            model=f"scaleway/{model}",
-            api_key=api_key,
+            **provider_completion_kwargs(model, api_key),
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,

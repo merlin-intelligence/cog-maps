@@ -73,9 +73,14 @@ SCALEWAY_MODELS = (
     "gpt-oss-120b",
 )
 
+# Mistral AI API (https://api.mistral.ai/v1/chat/completions, MISTRAL_API_KEY)
+MISTRAL_MODELS = (
+    "mistral-large-4",
+)
+
 # ── Ontology-building page (/build ontology/) ──
-# Models offered for the OLAF tool-calling agent loop. Restricted to Scaleway —
-# no function-calling wiring exists for the local Ollama backend today.
+# Models offered for the OLAF tool-calling agent loop (Scaleway bare ids +
+# provider-prefixed external endpoints such as "mistral/mistral-large-4").
 # A distinct (not aliased) tuple from SCALEWAY_MODELS: every entry here must
 # support function/tool calling through the Chat Completions API specifically
 # — unlike the rest of SCALEWAY_MODELS, "gpt-oss-120b" is excluded because
@@ -83,6 +88,7 @@ SCALEWAY_MODELS = (
 # Responses API, not Chat Completions (which is what litellm/this agent use).
 ONTOLOGY_TOOLCALL_MODELS = (
     "glm-5.3",
+    "mistral/mistral-large-4",
     "qwen3.8-27b",
     "qwen3-235b-a22b-instruct-2507",
     "deepseek-v4.1-flash-1017",
@@ -201,6 +207,73 @@ def scaleway_api_key() -> str:
         except Exception:
             pass
     return key
+
+
+def mistral_api_key() -> str:
+    """Mistral AI API key from env or st.secrets (or empty string if not set)."""
+    key = os.getenv("MISTRAL_API_KEY", "").strip()
+    if not key:
+        try:
+            import streamlit as st
+            if "MISTRAL_API_KEY" in st.secrets:
+                return str(st.secrets["MISTRAL_API_KEY"]).strip()
+        except Exception:
+            pass
+    return key
+
+
+def mistral_api_base() -> str | None:
+    """Optional Mistral API base URL override from ``MISTRAL_API_BASE_URL``.
+
+    Accepts either the base URL (``https://api.mistral.ai/v1``) or the full
+    completions endpoint (``https://api.mistral.ai/v1/chat/completions``) —
+    the trailing ``/chat/completions`` is stripped for LiteLLM. Returns None
+    when unset so LiteLLM uses its built-in ``https://api.mistral.ai/v1``.
+    """
+    raw = os.getenv("MISTRAL_API_BASE_URL", "").strip()
+    if not raw:
+        return None
+    raw = raw.rstrip("/")
+    if raw.endswith("/chat/completions"):
+        raw = raw[: -len("/chat/completions")]
+    return raw or None
+
+
+def model_provider(model: str) -> str:
+    """Provider id for a model name: ``'mistral'`` for ``mistral/...``, else ``'scaleway'``."""
+    if model.startswith("mistral/"):
+        return "mistral"
+    return "scaleway"
+
+
+def litellm_model_name(model: str) -> str:
+    """Ensure ``model`` carries its LiteLLM provider prefix (defaults to ``scaleway/``)."""
+    return model if "/" in model else f"scaleway/{model}"
+
+
+def api_key_for_model(model: str) -> str:
+    """Return the configured API key for ``model``'s provider."""
+    if model_provider(model) == "mistral":
+        return mistral_api_key()
+    return scaleway_api_key()
+
+
+def api_base_for_model(model: str) -> str | None:
+    """Return an optional ``api_base`` override for ``model``'s provider."""
+    if model_provider(model) == "mistral":
+        return mistral_api_base()
+    return None
+
+
+def provider_completion_kwargs(model: str, api_key: str) -> dict:
+    """Provider routing kwargs (``model``, ``api_key``, optional ``api_base``) for LiteLLM."""
+    kwargs: dict = {
+        "model": litellm_model_name(model),
+        "api_key": api_key,
+    }
+    if api_base := api_base_for_model(model):
+        kwargs["api_base"] = api_base
+    return kwargs
 
 
 def langfuse_enabled() -> bool:

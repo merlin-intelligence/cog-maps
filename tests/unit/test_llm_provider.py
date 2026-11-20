@@ -6,7 +6,7 @@ import pytest
 from litellm.types.utils import Choices, Message, ModelResponse
 
 from cogmaps import config
-from cogmaps.rag.llm_clients import OllamaClient, ScalewayClient, build_llm_client
+from cogmaps.rag.llm_clients import MistralClient, OllamaClient, ScalewayClient, build_llm_client
 from cogmaps.ui.components import SidebarState
 
 
@@ -190,3 +190,53 @@ def test_ollama_client_strips_inline_think_block(monkeypatch):
     response = _fake_completion_response({"content": "<think>hmm</think>The answer."})
     monkeypatch.setattr("litellm.completion", lambda **kw: response)
     assert OllamaClient(model="qwen3:8b", host="http://localhost:11434").chat("sys", "q") == "The answer."
+
+
+# ── MistralClient & provider routing ──
+
+def test_build_llm_client_selects_mistral():
+    client = build_llm_client(_state(llm_provider="mistral", llm_model="mistral-large-4",
+                                     mistral_api_key="mistral-secret"))
+    assert isinstance(client, MistralClient)
+    assert client.model == "mistral-large-4"
+    assert client.litellm_model == "mistral/mistral-large-4"
+    assert client.api_key == "mistral-secret"
+
+
+def test_mistral_client_routes_through_litellm_and_normalizes_base_url(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_BASE_URL", "https://api.mistral.ai/v1/chat/completions")
+    client = MistralClient(model="mistral-large-4", api_key="m-key")
+    assert client.api_base == "https://api.mistral.ai/v1"
+
+    captured = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        return _fake_completion_response({"content": "hello from mistral"})
+
+    monkeypatch.setattr("litellm.completion", fake_completion)
+    assert client.chat("sys", "q") == "hello from mistral"
+    assert captured["model"] == "mistral/mistral-large-4"
+    assert captured["api_key"] == "m-key"
+    assert captured["api_base"] == "https://api.mistral.ai/v1"
+    assert captured["temperature"] == 0.1
+
+
+def test_provider_completion_kwargs_routes_scaleway_and_mistral(monkeypatch):
+    from cogmaps.config import provider_completion_kwargs
+
+    monkeypatch.delenv("MISTRAL_API_BASE_URL", raising=False)
+    assert provider_completion_kwargs("glm-5.3", "scw-k") == {
+        "model": "scaleway/glm-5.3",
+        "api_key": "scw-k",
+    }
+    assert provider_completion_kwargs("mistral/mistral-large-4", "m-k") == {
+        "model": "mistral/mistral-large-4",
+        "api_key": "m-k",
+    }
+    monkeypatch.setenv("MISTRAL_API_BASE_URL", "https://custom.mistral.example/v1/chat/completions")
+    assert provider_completion_kwargs("mistral/mistral-large-4", "m-k") == {
+        "model": "mistral/mistral-large-4",
+        "api_key": "m-k",
+        "api_base": "https://custom.mistral.example/v1",
+    }
