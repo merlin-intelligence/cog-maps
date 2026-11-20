@@ -134,7 +134,7 @@ def _render_llm_settings() -> tuple[str, str, str, str, str, bool]:
         if "SCALEWAY_API_KEY" in st.secrets:
             scaleway_key = st.secrets["SCALEWAY_API_KEY"]
         if "MISTRAL_API_KEY" in st.secrets:
-            mistral_key = st.secrets["MISTRAL_API_KEY"]
+            mistral_key = str(st.secrets["MISTRAL_API_KEY"]).strip()
     except Exception:
         pass
 

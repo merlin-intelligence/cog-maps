@@ -242,3 +242,12 @@ def test_provider_completion_kwargs_routes_scaleway_and_mistral(monkeypatch):
         "top_p": 1.0,
         "api_base": "https://custom.mistral.example/v1",
     }
+
+
+def test_normalize_api_base():
+    from cogmaps.config import normalize_api_base
+
+    assert normalize_api_base(" https://x/v1/chat/completions/ ") == "https://x/v1"
+    assert normalize_api_base("https://x/v1") == "https://x/v1"
+    assert normalize_api_base("") is None
+    assert normalize_api_base(None) is None

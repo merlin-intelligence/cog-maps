@@ -375,8 +375,8 @@ def _blueprint_changed(message: str | None = None) -> None:
 
 
 def _run_discovery() -> None:
-    if not sb.scaleway_api_key:
-        st.warning("Set SCALEWAY_API_KEY to run domain discovery.")
+    if not _api_key_for(_discovery_model):
+        st.warning(f"Set {_missing_key_env(_discovery_model)} to run domain discovery with `{_discovery_model}`.")
         return
     with st.spinner(f"Profiling corpus and synthesizing domain pillars with {_discovery_model}..."):
         try:
@@ -536,6 +536,13 @@ def _render_build() -> None:
 
         if not _api_key_for(model):
             st.warning(f"Set {_missing_key_env(model)} to run the ontology-building agent with `{model}`.")
+        elif (domain_mode == "llm" and not _api_key_for(_discovery_model)
+              and load_blueprint(qdrant_col) is None):
+            # The build synthesizes a blueprint only when none is saved yet.
+            st.warning(
+                f"Set {_missing_key_env(_discovery_model)} to run domain discovery with "
+                f"`{_discovery_model}`, or pick another domain mode."
+            )
         elif st.button("▶ launch build", type="primary"):
             if not selected_docs:
                 st.warning("Select at least one document.")

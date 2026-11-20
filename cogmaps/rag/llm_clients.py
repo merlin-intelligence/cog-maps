@@ -15,7 +15,7 @@ import re
 
 from openai import APIConnectionError, APIError
 
-from cogmaps.config import chat_max_tokens, mistral_api_base, mistral_api_key
+from cogmaps.config import chat_max_tokens, mistral_api_base, mistral_api_key, normalize_api_base
 from cogmaps.core.llm_impacts import INTERACTIVE_RETRY, completion_with_retry
 
 logger = logging.getLogger(__name__)
@@ -137,12 +137,7 @@ class MistralClient:
     def __init__(self, model: str = "mistral-large-4", api_key: str = "", api_base: str | None = None):
         self.model = model.removeprefix("mistral/")
         self.api_key = api_key or mistral_api_key()
-        self.api_base = api_base if api_base is not None else mistral_api_base()
-        if self.api_base:
-            cleaned = self.api_base.rstrip("/")
-            if cleaned.endswith("/chat/completions"):
-                cleaned = cleaned[: -len("/chat/completions")]
-            self.api_base = cleaned or None
+        self.api_base = normalize_api_base(api_base) if api_base is not None else mistral_api_base()
         self.litellm_model = f"mistral/{self.model}"
         self.vendor = "Mistral"
         logger.debug("MistralClient: model=%s api_base=%s", self.model, self.api_base)

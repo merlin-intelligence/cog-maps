@@ -230,10 +230,12 @@ def mistral_api_base() -> str | None:
     the trailing ``/chat/completions`` is stripped for LiteLLM. Returns None
     when unset so LiteLLM uses its built-in ``https://api.mistral.ai/v1``.
     """
-    raw = os.getenv("MISTRAL_API_BASE_URL", "").strip()
-    if not raw:
-        return None
-    raw = raw.rstrip("/")
+    return normalize_api_base(os.getenv("MISTRAL_API_BASE_URL", ""))
+
+
+def normalize_api_base(raw: str | None) -> str | None:
+    """Strip whitespace, trailing slashes and a trailing ``/chat/completions`` (None when empty)."""
+    raw = (raw or "").strip().rstrip("/")
     if raw.endswith("/chat/completions"):
         raw = raw[: -len("/chat/completions")]
     return raw or None
