@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 
 from mcp import ClientSession
 
+from cogmaps.config import provider_completion_kwargs
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
 from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.agent import mcp_tools_to_litellm, select_seeds
@@ -283,8 +284,7 @@ class ReasoningAgent:
             response = await acompletion_with_retry(
                 retry=BACKGROUND_RETRY,
                 log=self.log,
-                model=f"scaleway/{self.model}",
-                api_key=self.api_key,
+                **provider_completion_kwargs(self.model, self.api_key),
                 messages=prune_history(messages, KEEP_RECENT_TURNS, PRUNED_RESULT_CHARS),
                 tools=self.tools,
                 tool_choice="auto",

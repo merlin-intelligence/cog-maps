@@ -20,7 +20,7 @@ from collections.abc import Callable
 
 from qdrant_client import models
 
-from cogmaps.config import domain_discovery_model, oxigraph_url, scaleway_api_key
+from cogmaps.config import api_key_for_model, domain_discovery_model, oxigraph_url
 from cogmaps.core.llm_impacts import record_llm_impacts
 from cogmaps.ontology.agent import run_build, select_seeds
 from cogmaps.ontology.domain_discovery import (
@@ -266,7 +266,7 @@ class OntologyJobRunner:
                 await run_build(
                     session,
                     model=job["llm_model"],
-                    api_key=scaleway_api_key(),
+                    api_key=api_key_for_model(job["llm_model"]),
                     doc_filenames=job["doc_filenames"],
                     log=log,
                     set_progress=set_progress,
@@ -301,7 +301,7 @@ class OntologyJobRunner:
                 summary = await run_reasoning(
                     session,
                     model=job["llm_model"],
-                    api_key=scaleway_api_key(),
+                    api_key=api_key_for_model(job["llm_model"]),
                     ontology_id=job["ontology_id"],
                     log=log,
                     set_progress=set_progress,
@@ -342,7 +342,7 @@ class OntologyJobRunner:
                 summary = await run_merge(
                     session,
                     model=job["llm_model"],
-                    api_key=scaleway_api_key(),
+                    api_key=api_key_for_model(job["llm_model"]),
                     ontology_id=job["ontology_id"],
                     reference_id=options["reference"],
                     other_id=options["other"],

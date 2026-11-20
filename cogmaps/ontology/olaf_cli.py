@@ -41,9 +41,15 @@ def run_olaf(args: list[str], config_dir: str, *, timeout: float = DEFAULT_TIMEO
         capture_output=True, text=True, timeout=timeout,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"'olaf {' '.join(args)}' failed: {result.stderr.strip() or result.stdout.strip()}"
-        )
+        detail = result.stderr.strip() or result.stdout.strip()
+        if not detail:
+            if result.returncode == -9:
+                detail = "killed by signal 9 (SIGKILL — likely out of memory)"
+            elif result.returncode < 0:
+                detail = f"killed by signal {-result.returncode}"
+            else:
+                detail = f"exit code {result.returncode}"
+        raise RuntimeError(f"'olaf {' '.join(args)}' failed: {detail}")
     return result
 
 

@@ -16,6 +16,7 @@ import torch
 from spacy.cli import download as spacy_download
 
 from cogmaps.config import (
+    MISTRAL_MODELS,
     SCALEWAY_MODELS,
     llm_provider,
     ollama_host,
@@ -23,6 +24,7 @@ from cogmaps.config import (
     qdrant_host,
     qdrant_port,
 )
+from cogmaps.config import mistral_api_key as env_mistral_key
 from cogmaps.config import scaleway_api_key as env_scaleway_key
 from cogmaps.core.embeddings import EmbeddingModel
 from cogmaps.core.llm_impacts import LLMCallImpact
@@ -51,6 +53,7 @@ class SidebarState:
     scaleway_api_key: str
     ollama_host: str
     llm_ready: bool
+    mistral_api_key: str = ""
 
 
 @st.cache_resource
@@ -113,10 +116,10 @@ def list_ollama_models(host: str) -> list[str]:
         return []
 
 
-def _render_llm_settings() -> tuple[str, str, str, str, bool]:
+def _render_llm_settings() -> tuple[str, str, str, str, str, bool]:
     """Render the 'llm settings' sidebar block for the active provider.
 
-    Returns ``(provider, model, scaleway_api_key, ollama_host_url, llm_ready)``.
+    Returns ``(provider, model, scaleway_api_key, mistral_api_key, ollama_host_url, llm_ready)``.
     """
     st.markdown(
         '<p style="font-family:\'DM Mono\',monospace;font-size:0.68rem;'
@@ -125,8 +128,22 @@ def _render_llm_settings() -> tuple[str, str, str, str, bool]:
         unsafe_allow_html=True,
     )
 
-    providers = ["scaleway", "ollama"]
-    labels = {"scaleway": "Scaleway (cloud)", "ollama": "Ollama (local)"}
+    scaleway_key = env_scaleway_key()
+    mistral_key = env_mistral_key()
+    try:
+        if "SCALEWAY_API_KEY" in st.secrets:
+            scaleway_key = st.secrets["SCALEWAY_API_KEY"]
+        if "MISTRAL_API_KEY" in st.secrets:
+            mistral_key = str(st.secrets["MISTRAL_API_KEY"]).strip()
+    except Exception:
+        pass
+
+    providers = ["scaleway", "mistral", "ollama"]
+    labels = {
+        "scaleway": "Scaleway (cloud)",
+        "mistral": "Mistral (cloud)",
+        "ollama": "Ollama (local)",
+    }
     default_provider = llm_provider()
     provider = st.radio(
         "backend",
@@ -158,16 +175,23 @@ def _render_llm_settings() -> tuple[str, str, str, str, bool]:
             'color:#8a6a50;text-align:center;margin-top:-0.5rem">Powered by Ollama (local)</p>',
             unsafe_allow_html=True,
         )
-        return provider, model, "", host_url, ready
+        return provider, model, scaleway_key, mistral_key, host_url, ready
+
+    if provider == "mistral":
+        model = st.selectbox(
+            "model",
+            MISTRAL_MODELS,
+            format_func=lambda x: x.split("/")[-1],
+            help="Mistral AI model used in the Chat page (api.mistral.ai).",
+        )
+        st.markdown(
+            '<p style="font-family:\'DM Mono\',monospace;font-size:0.6rem;'
+            'color:#8a6a50;text-align:center;margin-top:-0.5rem">Powered by Mistral AI</p>',
+            unsafe_allow_html=True,
+        )
+        return provider, model, scaleway_key, mistral_key, ollama_host(), bool(mistral_key)
 
     # Default provider: Scaleway Generative APIs cloud
-    api_key = env_scaleway_key()
-    try:
-        if "SCALEWAY_API_KEY" in st.secrets:
-            api_key = st.secrets["SCALEWAY_API_KEY"]
-    except Exception:
-        pass
-
     model = st.selectbox(
         "model",
         SCALEWAY_MODELS,
@@ -179,7 +203,7 @@ def _render_llm_settings() -> tuple[str, str, str, str, bool]:
         'color:#8a6a50;text-align:center;margin-top:-0.5rem">Powered by Scaleway</p>',
         unsafe_allow_html=True,
     )
-    return provider, model, api_key, ollama_host(), bool(api_key)
+    return provider, model, scaleway_key, mistral_key, ollama_host(), bool(scaleway_key)
 
 
 def render_sidebar() -> SidebarState:
@@ -219,7 +243,7 @@ def render_sidebar() -> SidebarState:
         device = st.selectbox("embedding device", _detect_devices())
 
         st.markdown("---")
-        provider, model, api_key, ollama_host_url, llm_ready = _render_llm_settings()
+        provider, model, api_key, mistral_key, ollama_host_url, llm_ready = _render_llm_settings()
 
         st.markdown("---")
         user = current_user()
@@ -283,11 +307,13 @@ def render_sidebar() -> SidebarState:
         scaleway_api_key=api_key,
         ollama_host=ollama_host_url,
         llm_ready=llm_ready,
+        mistral_api_key=mistral_key,
     )
 
 
 _PROVIDER_LABELS = {
     "scaleway": "Scaleway",
+    "mistral": "Mistral",
     "ollama": "Ollama",
 }
 

@@ -42,6 +42,7 @@ from dataclasses import dataclass
 
 from mcp import ClientSession
 
+from cogmaps.config import provider_completion_kwargs
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
 from cogmaps.ontology.agent import select_seeds
 from cogmaps.ontology.merging_prompts import SYSTEM_PROMPT, TASK_PROMPT
@@ -307,8 +308,7 @@ class MergingAgent:
             response = await acompletion_with_retry(
                 retry=BACKGROUND_RETRY,
                 log=self.log,
-                model=f"scaleway/{self.model}",
-                api_key=self.api_key,
+                **provider_completion_kwargs(self.model, self.api_key),
                 messages=messages,
                 max_tokens=4096,
                 temperature=0,

@@ -13,6 +13,7 @@ from cogmaps.config import (
     ONTOLOGY_TOOLCALL_MODELS,
     TEMP_GRAPH_OUTPUTS,
     domain_discovery_model,
+    model_provider,
     oxigraph_url,
 )
 from cogmaps.core.llm_impacts import LLMCallImpact, record_llm_impacts
@@ -109,6 +110,14 @@ apply_global_styles()
 if not check_password():
     st.stop()
 sb = render_sidebar()
+
+
+def _api_key_for(model: str) -> str:
+    return sb.mistral_api_key if model_provider(model) == "mistral" else sb.scaleway_api_key
+
+
+def _missing_key_env(model: str) -> str:
+    return "MISTRAL_API_KEY" if model_provider(model) == "mistral" else "SCALEWAY_API_KEY"
 
 section_header("/build ontology/", "construct your knowledge model")
 
@@ -366,8 +375,8 @@ def _blueprint_changed(message: str | None = None) -> None:
 
 
 def _run_discovery() -> None:
-    if not sb.scaleway_api_key:
-        st.warning("Set SCALEWAY_API_KEY to run domain discovery.")
+    if not _api_key_for(_discovery_model):
+        st.warning(f"Set {_missing_key_env(_discovery_model)} to run domain discovery with `{_discovery_model}`.")
         return
     with st.spinner(f"Profiling corpus and synthesizing domain pillars with {_discovery_model}..."):
         try:
@@ -525,8 +534,15 @@ def _render_build() -> None:
             selected_seeds = []
             st.caption("No seed ontology loaded — load reference ontologies from /explore ontology/ to reuse them here.")
 
-        if not sb.scaleway_api_key:
-            st.warning("Set SCALEWAY_API_KEY to run the ontology-building agent (Scaleway tool-calling only).")
+        if not _api_key_for(model):
+            st.warning(f"Set {_missing_key_env(model)} to run the ontology-building agent with `{model}`.")
+        elif (domain_mode == "llm" and not _api_key_for(_discovery_model)
+              and load_blueprint(qdrant_col) is None):
+            # The build synthesizes a blueprint only when none is saved yet.
+            st.warning(
+                f"Set {_missing_key_env(_discovery_model)} to run domain discovery with "
+                f"`{_discovery_model}`, or pick another domain mode."
+            )
         elif st.button("▶ launch build", type="primary"):
             if not selected_docs:
                 st.warning("Select at least one document.")
@@ -537,7 +553,7 @@ def _render_build() -> None:
                     collection=qdrant_col,
                     ontology_id=ontology_id,
                     doc_filenames=selected_docs,
-                    llm_provider="scaleway",
+                    llm_provider=model_provider(model),
                     llm_model=model,
                     use_domain_discovery=domain_mode != "none",
                     options={"seed_ids": selected_seeds, "domain_mode": domain_mode},
@@ -589,8 +605,8 @@ def _render_merge_form() -> None:
         "the LLM judges each pair of similar ones: same thing (merged), more specific (linked under it) or "
         "unrelated — from their definitions and source text."
     )
-    if not sb.scaleway_api_key:
-        st.warning("Set SCALEWAY_API_KEY to run the merging agent (Scaleway only).")
+    if not _api_key_for(model):
+        st.warning(f"Set {_missing_key_env(model)} to run the merging agent with `{model}`.")
     elif st.button("▶ launch merge", type="primary"):
         job_id = str(uuid.uuid4())
         ontology_job_store().create_job(
@@ -598,7 +614,7 @@ def _render_merge_form() -> None:
             collection=qdrant_col,
             ontology_id=ontology_id,
             doc_filenames=[],
-            llm_provider="scaleway",
+            llm_provider=model_provider(model),
             llm_model=model,
             job_type="merge",
             options={
@@ -833,8 +849,8 @@ def _render_edit_chat(job_id: str) -> None:
     request = st.chat_input("ask for a review or a change…", key=f"edit_ask_{ontology_id}")
     if not request:
         return
-    if not sb.scaleway_api_key:
-        st.warning("Set SCALEWAY_API_KEY to use the editing agent (Scaleway tool-calling only).")
+    if not _api_key_for(model):
+        st.warning(f"Set {_missing_key_env(model)} to use the editing agent with `{model}`.")
         return
     with st.chat_message("user"):
         st.write(request)
@@ -850,7 +866,7 @@ def _render_edit_chat(job_id: str) -> None:
                                 seed_ids=build_seed_ids(ontology_job_store(), qdrant_col, ontology_id),
                                 log=status.write) as session:
                 await edit_ask(session, conversation, request, sources=sources, model=model,
-                               api_key=sb.scaleway_api_key, log=status.write)
+                               api_key=_api_key_for(model), log=status.write)
 
         try:
             with record_llm_impacts(session_llm_calls("ontology_building").append):
@@ -958,8 +974,8 @@ def _render_reasoning() -> None:
 
         latest = ontology_job_store().latest_job_for(qdrant_col, ontology_id=ontology_id)
         busy = latest is not None and latest["status"] in ("running", "pending")
-        if not sb.scaleway_api_key:
-            st.warning("Set SCALEWAY_API_KEY to run the reasoning agent (Scaleway tool-calling only).")
+        if not _api_key_for(reasoning_model):
+            st.warning(f"Set {_missing_key_env(reasoning_model)} to run the reasoning agent with `{reasoning_model}`.")
         elif st.button("▶ launch reasoning", type="primary", disabled=busy,
                        help="A job is already running for this ontology." if busy else None):
             job_id = str(uuid.uuid4())
@@ -968,7 +984,7 @@ def _render_reasoning() -> None:
                 collection=qdrant_col,
                 ontology_id=ontology_id,
                 doc_filenames=[],
-                llm_provider="scaleway",
+                llm_provider=model_provider(reasoning_model),
                 llm_model=reasoning_model,
                 job_type="reasoning",
                 options={

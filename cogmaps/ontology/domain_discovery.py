@@ -20,9 +20,10 @@ from pydantic import BaseModel, Field
 from qdrant_client import models
 
 from cogmaps.config import (
+    api_key_for_model,
     domain_discovery_model,
     domain_profiles_dir,
-    scaleway_api_key,
+    provider_completion_kwargs,
 )
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, completion_with_retry
 from cogmaps.ontology.olaf_config import sanitize_ontology_id
@@ -274,9 +275,9 @@ def synthesize_domain_blueprint(
 ) -> DomainBlueprint:
     """Synthesize a DomainBlueprint via Scaleway Chat Completions (``DOMAIN_DISCOVERY_MODEL`` by default)."""
     target_model = model or domain_discovery_model()
-    target_key = api_key or scaleway_api_key()
+    target_key = api_key or api_key_for_model(target_model)
     if not target_key:
-        raise ValueError("Scaleway API key is required for automated domain discovery.")
+        raise ValueError("API key is required for automated domain discovery.")
 
     user_lines = [
         f"Collection name: {collection}",
@@ -299,8 +300,7 @@ def synthesize_domain_blueprint(
         # Runs right before a build, on the same Scaleway quota — as patient as the build.
         response = completion_with_retry(
             retry=BACKGROUND_RETRY,
-            model=f"scaleway/{target_model}",
-            api_key=target_key,
+            **provider_completion_kwargs(target_model, target_key),
             messages=[
                 {"role": "system", "content": DISCOVERY_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},

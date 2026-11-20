@@ -15,7 +15,7 @@ import re
 
 from openai import APIConnectionError, APIError
 
-from cogmaps.config import chat_max_tokens
+from cogmaps.config import chat_max_tokens, mistral_api_base, mistral_api_key, normalize_api_base
 from cogmaps.core.llm_impacts import INTERACTIVE_RETRY, completion_with_retry
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,37 @@ class ScalewayClient:
         )
 
 
+class MistralClient:
+    """Client for the Mistral AI API (``https://api.mistral.ai/v1/chat/completions``).
+
+    Routes through litellm's native ``mistral/`` provider (respecting an optional
+    ``MISTRAL_API_BASE_URL`` override), so retries, Langfuse tracing and impact
+    tracking work identically to :class:`ScalewayClient`.
+    """
+
+    def __init__(self, model: str = "mistral-large-4", api_key: str = "", api_base: str | None = None):
+        self.model = model.removeprefix("mistral/")
+        self.api_key = api_key or mistral_api_key()
+        self.api_base = normalize_api_base(api_base) if api_base is not None else mistral_api_base()
+        self.litellm_model = f"mistral/{self.model}"
+        self.vendor = "Mistral"
+        logger.debug("MistralClient: model=%s api_base=%s", self.model, self.api_base)
+
+    def chat(self, system_prompt: str, user_content: str) -> str:
+        """Single-turn chat completion. Raises on non-200 responses or empty content."""
+        return _chat_completion(
+            vendor=self.vendor,
+            model=self.litellm_model,
+            api_base=self.api_base,
+            api_key=self.api_key,
+            system_prompt=system_prompt,
+            user_content=user_content,
+            timeout=120,
+            max_tokens=chat_max_tokens(),
+            temperature=0.1,
+        )
+
+
 class OllamaClient:
     """Client for a local Ollama server, via litellm's ``ollama_chat`` provider.
 
@@ -160,10 +191,12 @@ def build_llm_client(state):
     """Construct the chat client for the provider selected in the sidebar.
 
     ``state`` is a :class:`cogmaps.ui.components.SidebarState` — kept duck-typed here
-    (only ``llm_provider``, ``llm_model``, ``ollama_host``, ``scaleway_api_key`` are read)
-    so this module doesn't need to import the UI layer.
+    (only ``llm_provider``, ``llm_model``, ``ollama_host``, ``scaleway_api_key``,
+    ``mistral_api_key`` are read) so this module doesn't need to import the UI layer.
     """
     logger.info("Building LLM client: provider=%s model=%s", state.llm_provider, state.llm_model)
     if state.llm_provider == "ollama":
         return OllamaClient(model=state.llm_model, host=state.ollama_host)
+    if state.llm_provider == "mistral":
+        return MistralClient(model=state.llm_model, api_key=getattr(state, "mistral_api_key", ""))
     return ScalewayClient(model=state.llm_model, api_key=state.scaleway_api_key)
