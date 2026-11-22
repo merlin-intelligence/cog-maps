@@ -90,6 +90,20 @@ def migrate_shared_chunk_status(client, collection: str) -> int:
     return count
 
 
+def count_pending_chunks(client, collection: str, ontology_id: str, doc_filenames: list[str]) -> int:
+    """Chunks of the build's documents (all the collection's if none) not yet processed for the ontology."""
+    processed = models.FieldCondition(
+        key=chunk_status_field(ontology_id), match=models.MatchValue(value="processed"),
+    )
+    must = [models.FieldCondition(key="filename", match=models.MatchAny(any=list(doc_filenames)))] \
+        if doc_filenames else None
+    return client.count(
+        collection_name=collection,
+        count_filter=models.Filter(must=must, must_not=[processed]),
+        exact=True,
+    ).count
+
+
 async def final_export(
     session,
     ontology_id: str,
@@ -275,8 +289,17 @@ class OntologyJobRunner:
                     seed_ids=job["options"].get("seed_ids", []),
                 )
                 await final_export(session, job["ontology_id"], export_cb=export_cb, log=log)
+            try:
+                pending = count_pending_chunks(qdrant, collection, job["ontology_id"], job["doc_filenames"])
+            except Exception as e:  # noqa: BLE001
+                pending = None
+                log(f"Could not count the chunks still pending: {e}")
+            self.store.set_result(job_id, {"pending_chunks": pending})
             self.store.set_status(job_id, "done")
             log("Ontology build complete.")
+            if pending is not None:
+                log(f"{pending} chunk(s) still pending."
+                    + (" Re-launch the build to process them." if pending else ""))
         except Exception as e:  # noqa: BLE001
             self.store.set_status(job_id, "failed")
             log(f"Fatal: {e}\n{traceback.format_exc()}")
