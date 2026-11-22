@@ -294,6 +294,18 @@ def _job_to_show(job_type: str) -> str | None:
     return latest["id"] if latest else None
 
 
+def _render_build_result(result: dict) -> None:
+    """How many chunks the build left pending — whether it needs re-launching."""
+    pending = result.get("pending_chunks")
+    if pending is None:
+        return  # builds from before the count was kept, or the count failed
+    if pending:
+        st.warning(f"{pending} chunk(s) still pending — re-launch the build to process them "
+                   "(processed chunks are skipped).")
+    else:
+        st.caption("0 chunks pending — every chunk has been processed.")
+
+
 @st.fragment(run_every=2.0)
 def _render_job_status(job_type: str) -> None:
     job_id = _job_to_show(job_type)
@@ -331,7 +343,9 @@ def _render_job_status(job_type: str) -> None:
 
     if status == "done":
         st.success(f"{_JOB_KINDS[job_type].capitalize()} complete!")
-        if job_type == "reasoning":
+        if job_type == "build":
+            _render_build_result(job["result"] or {})
+        elif job_type == "reasoning":
             _render_reasoning_result(job["result"] or {})
         elif job_type == "merge":
             _render_merge_result(job["result"] or {})
