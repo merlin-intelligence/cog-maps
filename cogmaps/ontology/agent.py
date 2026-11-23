@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp import ClientSession
 
-from cogmaps.config import provider_completion_kwargs
+from cogmaps.config import chat_max_tokens, provider_completion_kwargs
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
 from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.olaf_config import has_ontology_content
@@ -73,6 +73,23 @@ SEED_TOOLS = frozenset({"seed_reuse", "seed_term_get", "property_semantic_search
 
 # Searches that always cover the seeds selected for the build (OLAF's agent does the same).
 SEED_SEARCH_TOOLS = frozenset({"concept_search", "concept_semantic_search", "property_search", "property_semantic_search"})
+
+# Lookup-only tools that do not modify the ontology or advance chunk processing.
+# Used by the search-loop guard to stop models from spiraling into hundreds of
+# consecutive concept_search calls on large existing ontologies without writing.
+SEARCH_ONLY_TOOLS = frozenset({
+    "concept_search",
+    "concept_semantic_search",
+    "concept_get",
+    "property_search",
+    "property_semantic_search",
+    "seed_term_get",
+})
+
+# After this many consecutive search-only turns, nudge the agent to write or
+# mark chunks processed; if it searches again anyway, pause search tools for
+# the following turn so it must make forward progress.
+MAX_CONSECUTIVE_SEARCH_ITERS = 3
 
 # Tool results longer than this are truncated before being sent to the LLM (an
 # export with the seeds once filled the whole context window). Large enough for
@@ -254,6 +271,31 @@ def _next_batch_message(batches: int, chunks_processed: int) -> str:
     )
 
 
+def _search_loop_nudge(consecutive: int, tools_paused: bool) -> str:
+    extra = (
+        " Search tools are paused for this turn so you must write or mark chunks processed now."
+        if tools_paused
+        else ""
+    )
+    return (
+        f"You have spent {consecutive} consecutive turn(s) only searching without creating "
+        "anything or marking chunks processed." + extra + " "
+        "Stop searching now: call concept_create, individual_create, property_create, "
+        "relation_add, or seed_reuse for any genuinely new entities from the current batch "
+        "(reusing URIs already returned above), and call chunk_mark_processed for every "
+        "chunk in this batch (skipping boilerplate/duplicate chunks) before moving on."
+    )
+
+
+def _truncated_nudge_message(remaining: list[str] | None) -> str:
+    where = f" Documents with pending chunks: {', '.join(remaining)}." if remaining else ""
+    return (
+        "Your previous response hit the output token limit (max_tokens) before emitting any tool calls. "
+        "Keep your reasoning brief and emit a smaller batch of 5 to 10 tool calls at a time "
+        "(e.g. a few seed_reuse/concept_create calls now, then more in the next turn)." + where
+    )
+
+
 def _nudge_message(remaining: list[str] | None) -> str:
     where = f" Documents with pending chunks: {', '.join(remaining)}." if remaining else ""
     return (
@@ -311,6 +353,7 @@ async def run_build(
 
     total_tool_calls = 0
     consecutive_nudges = 0
+    consecutive_search_iters = 0
     # Index of the first message of the chunk batch being worked on. Everything
     # before it is the setup (state, seeds, existing concepts), kept throughout.
     batch_start: int | None = None
@@ -324,28 +367,41 @@ async def run_build(
         if compacted:
             log(f"Compacted {compacted} old tool result(s) to keep the context small.")
 
+        pause_searches = consecutive_search_iters > MAX_CONSECUTIVE_SEARCH_ITERS
+        active_tools = (
+            [t for t in tools if t["function"]["name"] not in SEARCH_ONLY_TOOLS] or tools
+            if pause_searches
+            else tools
+        )
+
         response = await acompletion_with_retry(
             retry=BACKGROUND_RETRY,
             log=log,
             **provider_completion_kwargs(model, api_key),
             messages=messages,
-            tools=tools,
+            tools=active_tools,
             tool_choice="auto",
             # litellm's "scaleway" provider config doesn't whitelist tools/
             # tool_choice as supported params (as of litellm 1.101.0) even
             # though Scaleway's own API supports tool-calling — without this,
             # litellm raises UnsupportedParamsError instead of forwarding them.
             allowed_openai_params=["tools", "tool_choice"],
-            max_tokens=4096,
+            # Reasoning models (e.g. Mistral Large 4, GLM 5.3) spend tokens
+            # thinking before emitting a batch of tool calls; 4096 can truncate
+            # mid-JSON and come back with empty tool_calls. Same budget as /ask/.
+            max_tokens=chat_max_tokens(),
             temperature=0,
             timeout=120,
         )
 
-        msg = response.choices[0].message
+        choice = response.choices[0]
+        msg = choice.message
+        finish_reason = getattr(choice, "finish_reason", None)
         if recovered := recover_text_tool_calls(msg):
             log(f"Recovered {recovered} tool call(s) the model wrote as text.")
 
         if not msg.tool_calls:
+            consecutive_search_iters = 0
             if msg.content:
                 log(f"Agent message: {msg.content[:200]}")
             # Stopping is only accepted once OLAF confirms no requested chunk is
@@ -362,9 +418,17 @@ async def run_build(
                 )
                 break
             consecutive_nudges += 1
-            log(f"Nudging the agent to continue ({consecutive_nudges}/{MAX_CONSECUTIVE_NUDGES}).")
+            if finish_reason == "length":
+                log(
+                    f"Response truncated by max_tokens before emitting tool calls — "
+                    f"requesting a smaller batch ({consecutive_nudges}/{MAX_CONSECUTIVE_NUDGES})."
+                )
+                nudge = _truncated_nudge_message(remaining)
+            else:
+                log(f"Nudging the agent to continue ({consecutive_nudges}/{MAX_CONSECUTIVE_NUDGES}).")
+                nudge = _nudge_message(remaining)
             messages.append({"role": "assistant", "content": msg.content or ""})
-            messages.append({"role": "user", "content": _nudge_message(remaining)})
+            messages.append({"role": "user", "content": nudge})
             continue
 
         consecutive_nudges = 0
@@ -407,6 +471,11 @@ async def run_build(
 
             if tool_name not in allowed:
                 content = f"Error: {tool_name} is not available while building."
+            elif pause_searches and tool_name in SEARCH_ONLY_TOOLS:
+                content = (
+                    f"Error: {tool_name} is paused for this turn after repeated search-only turns. "
+                    "Create your new entities now or call chunk_mark_processed."
+                )
             else:
                 try:
                     result = await session.call_tool(tool_name, tool_args)
@@ -440,6 +509,21 @@ async def run_build(
                 "name": tool_name,
                 "content": content,
             })
+
+        if all(tc.function.name in SEARCH_ONLY_TOOLS for tc in msg.tool_calls):
+            consecutive_search_iters += 1
+            if consecutive_search_iters >= MAX_CONSECUTIVE_SEARCH_ITERS:
+                will_pause = consecutive_search_iters > MAX_CONSECUTIVE_SEARCH_ITERS
+                log(
+                    f"Search-only loop guard ({consecutive_search_iters} consecutive search turn(s))"
+                    + (" — pausing search tools for next turn." if will_pause else " — nudging agent to write.")
+                )
+                messages.append({
+                    "role": "user",
+                    "content": _search_loop_nudge(consecutive_search_iters, will_pause),
+                })
+        else:
+            consecutive_search_iters = 0
     else:
         log(f"Reached max_iterations ({max_iterations}) — agent stopped.")
 
