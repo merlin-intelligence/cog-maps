@@ -188,7 +188,10 @@ def max_analysis_documents() -> int:
 
 
 def chat_max_tokens() -> int:
-    """Token budget for one /ask/ answer from Scaleway (``CHAT_MAX_TOKENS``, default 8192).
+    """Token budget for one LLM reply (``CHAT_MAX_TOKENS``, default 8192).
+
+    Used by the /ask/ answers from Scaleway, the ontology editing chat and each
+    turn of the ontology build agent.
 
     Reasoning models spend part of it thinking before they answer, so a low
     cap truncates long answers or leaves no room for the answer at all.
@@ -374,7 +377,7 @@ def get_ocr_languages() -> str:
     try:
         langs = [f.split(".")[0] for f in os.listdir(tessdata_dir) if f.endswith(".traineddata")]
         # Exclude 'osd' (Orientation and Script Detection) which is not a language
-        langs = [l for l in langs if l != "osd"]
+        langs = [lang for lang in langs if lang != "osd"]
         return "+".join(sorted(langs)) if langs else "eng"
     except Exception:
         return "eng"

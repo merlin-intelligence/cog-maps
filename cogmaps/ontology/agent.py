@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp import ClientSession
 
-from cogmaps.config import provider_completion_kwargs
+from cogmaps.config import chat_max_tokens, provider_completion_kwargs
 from cogmaps.core.llm_impacts import BACKGROUND_RETRY, acompletion_with_retry
 from cogmaps.core.text_tool_calls import recover_text_tool_calls
 from cogmaps.ontology.olaf_config import has_ontology_content
@@ -73,6 +73,41 @@ SEED_TOOLS = frozenset({"seed_reuse", "seed_term_get", "property_semantic_search
 
 # Searches that always cover the seeds selected for the build (OLAF's agent does the same).
 SEED_SEARCH_TOOLS = frozenset({"concept_search", "concept_semantic_search", "property_search", "property_semantic_search"})
+
+# Lookup-only tools that do not modify the ontology or advance chunk processing.
+# Used by the search-loop guard to stop models from spiraling into hundreds of
+# consecutive concept_search calls on large existing ontologies without writing.
+SEARCH_ONLY_TOOLS = frozenset({
+    "concept_search",
+    "concept_semantic_search",
+    "concept_get",
+    "property_search",
+    "property_semantic_search",
+    "seed_term_get",
+})
+
+# Tools that move the build forward: reading a new batch, writing to the
+# ontology, or marking chunks processed. Only these reset the search-loop guard;
+# neutral calls (chunk_list, ontology_summary, exports…) leave its count as is,
+# so alternating them with searches doesn't escape it.
+PROGRESS_TOOLS = frozenset({
+    "chunk_read_batch",
+    "chunk_mark_processed",
+    "concept_create",
+    "concept_update",
+    "individual_create",
+    "property_create",
+    "property_update",
+    "relation_add",
+    "relation_delete",
+    "disjoint_add",
+    "seed_reuse",
+})
+
+# After this many search turns without progress, nudge the agent to write or
+# mark chunks processed; if it searches again anyway, pause search tools until
+# it makes forward progress.
+MAX_CONSECUTIVE_SEARCH_ITERS = 3
 
 # Tool results longer than this are truncated before being sent to the LLM (an
 # export with the seeds once filled the whole context window). Large enough for
@@ -254,6 +289,64 @@ def _next_batch_message(batches: int, chunks_processed: int) -> str:
     )
 
 
+def _search_loop_nudge(consecutive: int, tools_paused: bool, use_seeds: bool) -> str:
+    extra = (
+        " Search tools are paused for this turn so you must write or mark chunks processed now."
+        if tools_paused
+        else ""
+    )
+    writers = "concept_create, individual_create, property_create, relation_add" + (
+        ", or seed_reuse" if use_seeds else ""
+    )
+    return (
+        f"You have spent {consecutive} turn(s) only searching without creating "
+        "anything or marking chunks processed." + extra + " "
+        f"Stop searching now: call {writers} for any genuinely new entities from the current batch "
+        "(reusing URIs already returned above), and call chunk_mark_processed for every "
+        "chunk in this batch (skipping boilerplate/duplicate chunks) before moving on."
+    )
+
+
+def _truncated_nudge_message(remaining: list[str] | None, use_seeds: bool, dropped_calls: int = 0) -> str:
+    """Asks for a smaller batch after a reply cut by max_tokens.
+
+    ``dropped_calls`` is how many tool calls were cut mid-arguments and not run
+    (0: the reply was cut before any tool call).
+    """
+    if dropped_calls:
+        what = (
+            f"Your previous response hit the output token limit (max_tokens): its last {dropped_calls} "
+            "tool call(s) were cut off and NOT run — emit them again."
+        )
+    else:
+        what = "Your previous response hit the output token limit (max_tokens) before emitting any tool calls."
+    if remaining:
+        where = f" Documents with pending chunks: {', '.join(remaining)}."
+    elif remaining == []:
+        where = " No chunk is pending: finish with ontology_orphans (connect the isolated entities), then ontology_export."
+    else:
+        where = ""
+    example = "seed_reuse/concept_create" if use_seeds else "concept_create"
+    return (
+        what + " Keep your reasoning brief and emit a smaller batch of 5 to 10 tool calls at a time "
+        f"(e.g. a few {example} calls now, then more in the next turn)." + where
+    )
+
+
+def _complete_tool_calls(tool_calls: list[Any]) -> list[Any]:
+    """The tool calls whose arguments are a whole JSON object (a reply cut by
+    max_tokens leaves the last one mid-JSON)."""
+    complete = []
+    for tc in tool_calls:
+        try:
+            args = json.loads(tc.function.arguments or "")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(args, dict):
+            complete.append(tc)
+    return complete
+
+
 def _nudge_message(remaining: list[str] | None) -> str:
     where = f" Documents with pending chunks: {', '.join(remaining)}." if remaining else ""
     return (
@@ -289,6 +382,7 @@ async def run_build(
     seed ontologies the agent may reuse terms from (none if empty).
     """
     seed_ids = await select_seeds(session, list(seed_ids), log)
+    use_seeds = bool(seed_ids)
     allowed = BUILD_TOOLS | SEED_TOOLS if seed_ids else BUILD_TOOLS
     forced_args = {t: {"include_seeds": True} for t in SEED_SEARCH_TOOLS} if seed_ids else {}
 
@@ -311,6 +405,7 @@ async def run_build(
 
     total_tool_calls = 0
     consecutive_nudges = 0
+    consecutive_search_iters = 0
     # Index of the first message of the chunk batch being worked on. Everything
     # before it is the setup (state, seeds, existing concepts), kept throughout.
     batch_start: int | None = None
@@ -324,51 +419,93 @@ async def run_build(
         if compacted:
             log(f"Compacted {compacted} old tool result(s) to keep the context small.")
 
+        pause_searches = consecutive_search_iters > MAX_CONSECUTIVE_SEARCH_ITERS
+        active_tools = (
+            [t for t in tools if t["function"]["name"] not in SEARCH_ONLY_TOOLS] or tools
+            if pause_searches
+            else tools
+        )
+
         response = await acompletion_with_retry(
             retry=BACKGROUND_RETRY,
             log=log,
             **provider_completion_kwargs(model, api_key),
             messages=messages,
-            tools=tools,
+            tools=active_tools,
             tool_choice="auto",
             # litellm's "scaleway" provider config doesn't whitelist tools/
             # tool_choice as supported params (as of litellm 1.101.0) even
             # though Scaleway's own API supports tool-calling — without this,
             # litellm raises UnsupportedParamsError instead of forwarding them.
             allowed_openai_params=["tools", "tool_choice"],
-            max_tokens=4096,
+            # Reasoning models (e.g. Mistral Large 4, GLM 5.3) spend tokens
+            # thinking before emitting a batch of tool calls; 4096 can truncate
+            # mid-JSON and come back with empty tool_calls. Same budget as /ask/.
+            max_tokens=chat_max_tokens(),
             temperature=0,
-            timeout=120,
+            # Up to chat_max_tokens() of reasoning + tool calls: 120 s timed out
+            # on 8192-token replies. Same as the editing agent.
+            timeout=180,
         )
 
-        msg = response.choices[0].message
+        choice = response.choices[0]
+        msg = choice.message
+        truncated = getattr(choice, "finish_reason", None) == "length"
         if recovered := recover_text_tool_calls(msg):
             log(f"Recovered {recovered} tool call(s) the model wrote as text.")
 
-        if not msg.tool_calls:
+        tool_calls = list(msg.tool_calls or [])
+        dropped_calls = 0
+        if truncated and tool_calls:
+            # The last call of a cut reply is usually mid-JSON: running it with
+            # empty arguments would create junk (e.g. an unlabeled concept).
+            complete = _complete_tool_calls(tool_calls)
+            dropped_calls = len(tool_calls) - len(complete)
+            tool_calls = complete
+            if dropped_calls:
+                log(f"Response truncated by max_tokens — dropped {dropped_calls} incomplete tool call(s).")
+
+        if not tool_calls:
             if msg.content:
                 log(f"Agent message: {msg.content[:200]}")
             # Stopping is only accepted once OLAF confirms no requested chunk is
             # still pending — the model's own claim that it is done isn't enough.
+            # A reply cut by max_tokens isn't a decision to stop: the final
+            # orphans/export step may be what got cut.
             remaining = await _docs_with_pending_chunks(session, doc_filenames)
-            if remaining == []:
+            if remaining == [] and not truncated:
                 log("Agent finished — no pending chunks remain.")
                 break
             if consecutive_nudges >= MAX_CONSECUTIVE_NUDGES or iteration == max_iterations:
-                pending_info = ", ".join(remaining) if remaining else "unknown (chunk_list failed)"
-                log(
-                    f"Agent stopped after {consecutive_nudges} nudge(s) while chunks are still pending "
-                    f"({pending_info}). Re-launch the build to continue — processed chunks are skipped."
-                )
+                if remaining == []:
+                    log(
+                        f"Agent stopped after {consecutive_nudges} nudge(s) with its replies cut by max_tokens. "
+                        "No chunk is pending, but the final orphans/export step may be incomplete — "
+                        "raise CHAT_MAX_TOKENS or pick another model."
+                    )
+                else:
+                    pending_info = ", ".join(remaining) if remaining else "unknown (chunk_list failed)"
+                    log(
+                        f"Agent stopped after {consecutive_nudges} nudge(s) while chunks are still pending "
+                        f"({pending_info}). Re-launch the build to continue — processed chunks are skipped."
+                    )
                 break
             consecutive_nudges += 1
-            log(f"Nudging the agent to continue ({consecutive_nudges}/{MAX_CONSECUTIVE_NUDGES}).")
+            if truncated:
+                log(
+                    f"Response truncated by max_tokens before emitting tool calls — "
+                    f"requesting a smaller batch ({consecutive_nudges}/{MAX_CONSECUTIVE_NUDGES})."
+                )
+                nudge = _truncated_nudge_message(remaining, use_seeds, dropped_calls)
+            else:
+                log(f"Nudging the agent to continue ({consecutive_nudges}/{MAX_CONSECUTIVE_NUDGES}).")
+                nudge = _nudge_message(remaining)
             messages.append({"role": "assistant", "content": msg.content or ""})
-            messages.append({"role": "user", "content": _nudge_message(remaining)})
+            messages.append({"role": "user", "content": nudge})
             continue
 
         consecutive_nudges = 0
-        if any(tc.function.name == "chunk_read_batch" for tc in msg.tool_calls):
+        if any(tc.function.name == "chunk_read_batch" for tc in tool_calls):
             # A new batch of chunks: what was extracted from the previous ones is
             # in the ontology now, so its conversation is dropped instead of being
             # sent again with every call.
@@ -390,11 +527,11 @@ async def run_build(
                     "type": "function",
                     "function": {"name": tc.function.name, "arguments": tc.function.arguments},
                 }
-                for tc in msg.tool_calls
+                for tc in tool_calls
             ],
         })
 
-        for tc in msg.tool_calls:
+        for tc in tool_calls:
             tool_name = tc.function.name
             try:
                 tool_args = json.loads(tc.function.arguments)
@@ -407,6 +544,11 @@ async def run_build(
 
             if tool_name not in allowed:
                 content = f"Error: {tool_name} is not available while building."
+            elif pause_searches and tool_name in SEARCH_ONLY_TOOLS:
+                content = (
+                    f"Error: {tool_name} is paused for this turn after repeated search-only turns. "
+                    "Create your new entities now or call chunk_mark_processed."
+                )
             else:
                 try:
                     result = await session.call_tool(tool_name, tool_args)
@@ -440,6 +582,28 @@ async def run_build(
                 "name": tool_name,
                 "content": content,
             })
+
+        # One user message after the tool results, whatever the reminders.
+        reminders: list[str] = []
+        if dropped_calls:
+            reminders.append(_truncated_nudge_message(None, use_seeds, dropped_calls))
+
+        called = {tc.function.name for tc in tool_calls}
+        if called & PROGRESS_TOOLS:
+            consecutive_search_iters = 0
+        elif called & SEARCH_ONLY_TOOLS:
+            consecutive_search_iters += 1
+            if consecutive_search_iters >= MAX_CONSECUTIVE_SEARCH_ITERS:
+                will_pause = consecutive_search_iters > MAX_CONSECUTIVE_SEARCH_ITERS
+                log(
+                    f"Search-only loop guard ({consecutive_search_iters} search turn(s) without progress)"
+                    + (" — pausing search tools for next turn." if will_pause else " — nudging agent to write.")
+                )
+                reminders.append(_search_loop_nudge(consecutive_search_iters, will_pause, use_seeds))
+        # Otherwise a neutral turn (chunk_list, summaries, exports…): the count is kept.
+
+        if reminders:
+            messages.append({"role": "user", "content": "\n\n".join(reminders)})
     else:
         log(f"Reached max_iterations ({max_iterations}) — agent stopped.")
 

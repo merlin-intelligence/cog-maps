@@ -525,10 +525,10 @@ def test_run_build_retries_on_rate_limit_and_transient_errors(monkeypatch):
     _, logs = _run(session)
 
     assert sleeps == [15, 30]
-    assert timeouts == [120, 120, 120, 240]
+    assert timeouts == [180, 180, 180, 360]
     assert any("Rate limited by the LLM provider — retrying in 15s (1/6)." in line for line in logs)
     assert any("Rate limited by the LLM provider — retrying in 30s (2/6)." in line for line in logs)
-    assert any("LLM call timed out — retrying with a 240s timeout (1/1)." in line for line in logs)
+    assert any("LLM call timed out — retrying with a 360s timeout (1/1)." in line for line in logs)
     assert any("no pending chunks remain" in line for line in logs)
 
 
@@ -613,3 +613,150 @@ def test_run_build_without_seeds_selects_none_and_hides_seed_tools(monkeypatch):
     assert offered[0] == {"concept_search", "chunk_list"}
     assert "Reuse seed terms" not in sent[0][0]["content"]
     assert not any(name == "sparql_query" for name, _ in session.calls)
+
+
+def test_run_build_search_loop_guard_nudges_then_pauses_search_tools(monkeypatch):
+    offered, sent = _offered_tools(monkeypatch, [
+        _tool_response("concept_search", {"query": "a"}, call_id="s1"),
+        _tool_response("concept_search", {"query": "b"}, call_id="s2"),  # 2nd search-only -> allowed (e.g. semantic follow-up)
+        _tool_response("concept_search", {"query": "c"}, call_id="s3"),  # 3rd search-only -> soft nudge
+        _tool_response("concept_search", {"query": "d"}, call_id="s4"),  # 4th search-only -> pause search tools
+        _tool_response("concept_create", {"label": "A", "definition": "def"}, call_id="w1"),  # resets guard
+        _text_response("Done."),
+    ])
+
+    class _Session(_FakeSession):
+        async def list_tools(self):
+            names = ["concept_search", "property_search", "concept_create", "chunk_mark_processed"]
+            return SimpleNamespace(tools=[SimpleNamespace(name=n, description="", inputSchema={}) for n in names])
+
+    session = _Session({"chunk_list": "[]", "concept_search": "[]", "concept_create": '{"uri":"u"}'})
+    _, logs = _run(session)
+
+    # Turns 1..4 keep search tools; turn 5 hides search tools after 4 consecutive search-only turns.
+    assert "concept_search" in offered[0]
+    assert "concept_search" in offered[3]
+    assert offered[4] == {"concept_create", "chunk_mark_processed"}
+    # Turn 6 restores search tools after the write on turn 5.
+    assert "concept_search" in offered[5]
+    # No nudge after turn 2; soft nudge before turn 4; hard-pause nudge before turn 5.
+    assert sent[2][-1]["role"] == "tool"
+    assert sent[3][-1]["role"] == "user"
+    assert "Stop searching now" in sent[3][-1]["content"]
+    assert "paused" not in sent[3][-1]["content"]
+    # No seeds selected: seed_reuse is hidden, so the nudge must not suggest it.
+    assert "seed_reuse" not in sent[3][-1]["content"]
+    assert sent[4][-1]["role"] == "user"
+    assert "paused" in sent[4][-1]["content"]
+    assert any("Search-only loop guard" in line for line in logs)
+
+
+def test_run_build_handles_max_tokens_truncation_and_uses_chat_max_tokens(monkeypatch):
+    monkeypatch.setenv("CHAT_MAX_TOKENS", "12345")
+    chunks = _PendingChunks(["c1"])
+    truncated = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=None), finish_reason="length")]
+    )
+    seen_max_tokens: list[int] = []
+    seen_timeouts: list[float] = []
+    sent: list[list[dict]] = []
+    it = iter([
+        truncated,
+        _tool_response("chunk_mark_processed", {"chunk_id": "c1"}),
+        _text_response("Done."),
+    ])
+
+    def fake_completion(**kwargs):
+        seen_max_tokens.append(kwargs["max_tokens"])
+        seen_timeouts.append(kwargs["timeout"])
+        sent.append(list(kwargs["messages"]))
+        return next(it)
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    session = _FakeSession({
+        "chunk_list": chunks.chunk_list,
+        "chunk_mark_processed": chunks.chunk_mark_processed,
+    })
+
+    _, logs = _run(session)
+
+    assert seen_max_tokens == [12345, 12345, 12345]
+    # Room for a full CHAT_MAX_TOKENS reply from a reasoning model.
+    assert seen_timeouts == [180, 180, 180]
+    nudge = sent[1][-1]
+    assert nudge["role"] == "user"
+    assert "output token limit" in nudge["content"]
+    assert "5 to 10 tool calls" in nudge["content"]
+    assert any("truncated by max_tokens" in line for line in logs)
+
+
+def test_run_build_search_guard_is_not_reset_by_neutral_tools(monkeypatch):
+    # Alternating chunk_list with searches makes no progress: the guard keeps counting.
+    offered, sent = _offered_tools(monkeypatch, [
+        _tool_response("concept_search", {"query": "a"}, call_id="s1"),
+        _tool_response("chunk_list", {"status": "pending"}, call_id="l1"),
+        _tool_response("concept_search", {"query": "b"}, call_id="s2"),
+        _tool_response("chunk_list", {"status": "pending"}, call_id="l2"),
+        _tool_response("concept_search", {"query": "c"}, call_id="s3"),  # 3rd search turn -> nudge
+        _text_response("Done."),
+    ])
+
+    class _Session(_FakeSession):
+        async def list_tools(self):
+            names = ["concept_search", "chunk_list", "concept_create", "chunk_mark_processed"]
+            return SimpleNamespace(tools=[SimpleNamespace(name=n, description="", inputSchema={}) for n in names])
+
+    session = _Session({"chunk_list": "[]", "concept_search": "[]"})
+    _, logs = _run(session)
+
+    assert sent[5][-1]["role"] == "user"
+    assert "Stop searching now" in sent[5][-1]["content"]
+    assert any("Search-only loop guard (3 search turn(s)" in line for line in logs)
+
+
+def test_run_build_drops_tool_calls_cut_by_max_tokens(monkeypatch):
+    whole = SimpleNamespace(
+        id="c-ok", function=SimpleNamespace(name="concept_create", arguments=json.dumps({"label": "A"})),
+    )
+    cut = SimpleNamespace(id="c-cut", function=SimpleNamespace(name="concept_create", arguments='{"label": "B", "defi'))
+    truncated = SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content=None, tool_calls=[whole, cut]), finish_reason="length",
+    )])
+    sent = _script_completions(monkeypatch, [truncated, _text_response("Done.")])
+    session = _FakeSession({"chunk_list": "[]", "concept_create": '{"uri":"u"}'})
+
+    _, logs = _run(session)
+
+    # Only the complete call ran, and never with empty arguments.
+    assert session.calls.count(("concept_create", {"label": "A"})) == 1
+    assert ("concept_create", {}) not in session.calls
+    assistant = sent[1][-3]
+    assert [tc["id"] for tc in assistant["tool_calls"]] == ["c-ok"]
+    assert sent[1][-2]["role"] == "tool"
+    nudge = sent[1][-1]
+    assert nudge["role"] == "user"
+    assert "1 tool call(s) were cut off and NOT run" in nudge["content"]
+    assert any("dropped 1 incomplete tool call(s)" in line for line in logs)
+
+
+def test_run_build_does_not_stop_on_a_truncated_reply_without_pending_chunks(monkeypatch):
+    # Cut while finishing (orphans/export): no chunk is pending, but that isn't a stop.
+    truncated = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=None), finish_reason="length")]
+    )
+    sent = _script_completions(monkeypatch, [
+        truncated,
+        _tool_response("ontology_orphans", {}),
+        _text_response("Done."),
+    ])
+    session = _FakeSession({"chunk_list": "[]", "ontology_orphans": "[]"})
+
+    _, logs = _run(session)
+
+    assert len(sent) == 3
+    nudge = sent[1][-1]
+    assert nudge["role"] == "user"
+    assert "No chunk is pending" in nudge["content"]
+    assert "ontology_export" in nudge["content"]
+    assert ("ontology_orphans", {}) in session.calls
+    assert any("Agent finished" in line for line in logs)
