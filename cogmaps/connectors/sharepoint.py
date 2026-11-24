@@ -27,7 +27,7 @@ class SharePointClient:
         self._ctx = ctx
 
     @classmethod
-    def from_credentials(cls, site_url: str, client_id: str, client_secret: str) -> "SharePointClient":
+    def from_credentials(cls, site_url: str, client_id: str, client_secret: str) -> SharePointClient:
         creds = ClientCredential(client_id, client_secret)
         return cls(ClientContext(site_url).with_credentials(creds))
 

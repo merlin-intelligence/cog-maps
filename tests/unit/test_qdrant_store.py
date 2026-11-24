@@ -6,11 +6,10 @@ from __future__ import annotations
 
 import datetime
 
-import cogmaps.qdrant.store as store_mod
 from qdrant_client import models
 
+import cogmaps.qdrant.store as store_mod
 from cogmaps.qdrant.store import QdrantStore, date_range_filter, make_point
-
 
 # ── https=False must always be passed alongside api_key ──────────────────
 #

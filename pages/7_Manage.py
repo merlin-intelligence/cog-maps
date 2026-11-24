@@ -16,6 +16,7 @@ from cogmaps.ontology.cleanup import (
 )
 from cogmaps.ontology.domain_discovery import delete_blueprint
 from cogmaps.ontology.olaf_config import ontology_name_of
+from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import (
     check_password,
     is_admin,
@@ -24,7 +25,6 @@ from cogmaps.ui.auth import (
 )
 from cogmaps.ui.components import empty_state, ontology_job_store, render_sidebar, section_header
 from cogmaps.ui.styles import apply_global_styles
-from cogmaps.qdrant.store import QdrantStore
 
 apply_global_styles()
 if not check_password():
@@ -40,7 +40,7 @@ if not sb.is_connected:
 store = QdrantStore(sb.qdrant_host, sb.qdrant_port)
 _visible = list_visible_collections(store.list_collections())
 col_labels = [label for label, _ in _visible]
-col_map = {label: qdrant_name for label, qdrant_name in _visible}
+col_map = dict(_visible)
 
 if not col_labels:
     empty_state("📂", "No collections found.")
@@ -90,27 +90,26 @@ with st.expander("⚠ danger zone — delete entire collection"):
             + (f" and its {len(_ontology_ids)} ontolog{'y' if len(_ontology_ids) == 1 else 'ies'}"
                if _ontology_ids else ""),
             key=f"confirm_del_col_{qdrant_col}",
-        ):
-            if st.button("delete collection now", type="primary"):
-                if _ontology_ids:
-                    try:
-                        for msg in delete_ontologies_for_collection(qdrant_col, sb.qdrant_host, sb.qdrant_port):
-                            st.caption(f"✓ {msg}")
-                        ontology_job_store().delete_jobs_for(qdrant_col)
-                    except Exception as e:  # noqa: BLE001
-                        st.warning(f"Could not fully delete the associated ontologies: {e}")
-                # A blueprint can exist without any ontology (discovery run, no build yet).
+        ) and st.button("delete collection now", type="primary"):
+            if _ontology_ids:
                 try:
-                    if delete_blueprint(qdrant_col):
-                        st.caption("✓ Domain blueprint removed.")
-                except OSError as e:
-                    st.warning(f"Could not delete the domain blueprint: {e}")
-                try:
-                    store.delete_collection(qdrant_col)
-                    st.success(f"'{collection_name}' deleted.")
-                    st.rerun()
+                    for msg in delete_ontologies_for_collection(qdrant_col, sb.qdrant_host, sb.qdrant_port):
+                        st.caption(f"✓ {msg}")
+                    ontology_job_store().delete_jobs_for(qdrant_col)
                 except Exception as e:  # noqa: BLE001
-                    st.error(f"Error: {e}")
+                    st.warning(f"Could not fully delete the associated ontologies: {e}")
+            # A blueprint can exist without any ontology (discovery run, no build yet).
+            try:
+                if delete_blueprint(qdrant_col):
+                    st.caption("✓ Domain blueprint removed.")
+            except OSError as e:
+                st.warning(f"Could not delete the domain blueprint: {e}")
+            try:
+                store.delete_collection(qdrant_col)
+                st.success(f"'{collection_name}' deleted.")
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Error: {e}")
 
 with st.expander("⚠ danger zone — delete ontology only"):
     if not _can_modify:
@@ -138,18 +137,17 @@ with st.expander("⚠ danger zone — delete ontology only"):
         if st.checkbox(
             f"I confirm permanent deletion of the ontology '{_ontology_label}' of '{collection_name}'",
             key=f"confirm_del_onto_{_ontology_id}",
-        ):
-            if st.button("delete ontology now", type="primary", key=f"del_onto_btn_{_ontology_id}"):
-                try:
-                    for msg in delete_ontology(qdrant_col, _ontology_id, sb.qdrant_host, sb.qdrant_port):
-                        st.caption(f"✓ {msg}")
-                    # Otherwise /build ontology/ still lists it, from its jobs.
-                    if ontology_job_store().delete_jobs_for(qdrant_col, _ontology_id):
-                        st.caption("✓ Its build, merge and reasoning runs forgotten.")
-                    st.success("Ontology deleted.")
-                    st.rerun()
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"Error: {e}")
+        ) and st.button("delete ontology now", type="primary", key=f"del_onto_btn_{_ontology_id}"):
+            try:
+                for msg in delete_ontology(qdrant_col, _ontology_id, sb.qdrant_host, sb.qdrant_port):
+                    st.caption(f"✓ {msg}")
+                # Otherwise /build ontology/ still lists it, from its jobs.
+                if ontology_job_store().delete_jobs_for(qdrant_col, _ontology_id):
+                    st.caption("✓ Its build, merge and reasoning runs forgotten.")
+                st.success("Ontology deleted.")
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Error: {e}")
 
 with st.expander("🌱 danger zone — delete seed ontologies (global)"):
     st.caption(
@@ -176,15 +174,14 @@ with st.expander("🌱 danger zone — delete seed ontologies (global)"):
             if st.checkbox(
                 f"I confirm permanent deletion of seed '{seed_to_delete}'",
                 key=f"confirm_del_seed_{seed_to_delete}",
-            ):
-                if st.button("delete seed now", type="primary", key=f"del_seed_btn_{seed_to_delete}"):
-                    try:
-                        for msg in delete_seed(seed_to_delete, sb.qdrant_host, sb.qdrant_port):
-                            st.caption(f"✓ {msg}")
-                        st.success(f"Seed '{seed_to_delete}' deleted.")
-                        st.rerun()
-                    except Exception as e:  # noqa: BLE001
-                        st.error(f"Error: {e}")
+            ) and st.button("delete seed now", type="primary", key=f"del_seed_btn_{seed_to_delete}"):
+                try:
+                    for msg in delete_seed(seed_to_delete, sb.qdrant_host, sb.qdrant_port):
+                        st.caption(f"✓ {msg}")
+                    st.success(f"Seed '{seed_to_delete}' deleted.")
+                    st.rerun()
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Error: {e}")
 
 st.info(f"Viewing documents in **{collection_name}** ingested on **{selected_date.isoformat()}**")
 with st.spinner("fetching documents..."):

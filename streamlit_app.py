@@ -6,8 +6,10 @@ Custom navigation structure defined for the sidebar.
 from __future__ import annotations
 
 import streamlit as st
+
 from cogmaps.ui.auth import check_password
 from cogmaps.ui.styles import apply_global_styles
+
 
 def home_page():
     """Main welcome page content."""

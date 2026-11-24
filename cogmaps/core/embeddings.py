@@ -95,7 +95,7 @@ class EmbeddingModel:
             torch.cuda.empty_cache()
         logger.info("Embedding model released")
 
-    def __enter__(self) -> "EmbeddingModel":
+    def __enter__(self) -> EmbeddingModel:
         return self
 
     def __exit__(self, *_) -> None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,7 +14,6 @@ from cogmaps.ontology.domain_discovery import (
     _extract_json,
     delete_blueprint,
     load_blueprint,
-    profile_path_for,
     sample_corpus_for_discovery,
     save_blueprint,
     synthesize_domain_blueprint,
@@ -65,6 +65,7 @@ def test_domain_blueprint_model_validation(sample_blueprint):
 def test_save_and_load_blueprint(tmp_path, sample_blueprint):
     path = save_blueprint("test_col", sample_blueprint, base_dir=str(tmp_path))
     assert (tmp_path / "test_col.json").exists()
+    assert os.path.samefile(path, tmp_path / "test_col.json")
 
     loaded = load_blueprint("test_col", base_dir=str(tmp_path))
     assert loaded is not None

@@ -13,9 +13,7 @@ import datetime
 import logging
 import os
 import traceback
-from typing import Callable
-
-logger = logging.getLogger(__name__)
+from collections.abc import Callable
 
 from cogmaps.config import (
     BATCH_SIZE,
@@ -27,12 +25,14 @@ from cogmaps.core.chunking import chunk_with_chunknorris
 from cogmaps.core.embeddings import EmbeddingModel, detect_device
 from cogmaps.qdrant.store import QdrantStore, make_point
 
+logger = logging.getLogger(__name__)
+
 
 def _read_directories_file(path: str, log) -> list[str]:
     if not os.path.exists(path):
         log(f"Error: The file '{path}' was not found.")
         return []
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(path, encoding="utf-8", errors="ignore") as f:
         return [line.strip().strip("'\"") for line in f if line.strip()]
 
 

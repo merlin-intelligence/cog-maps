@@ -105,7 +105,7 @@ def test_select_adaptive_threshold_separates_dense_components():
     tau = select_adaptive_threshold(C, min_components=2, max_dominant_ratio=0.85)
     # Threshold must separate cluster A and cluster B (tau >= 0.90)
     assert tau >= 0.90
-    W = np.where(C > tau, C, 0.0)
+    W = np.where(tau < C, C, 0.0)
     np.fill_diagonal(W, 0.0)
     from scipy.sparse.csgraph import connected_components
     n_comps, _ = connected_components(W, directed=False)

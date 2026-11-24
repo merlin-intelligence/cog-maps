@@ -365,7 +365,7 @@ def build_pyvis_html(
             tooltips[n].append(str(definition))
         alt_labels = list(g.objects(n, SKOS.altLabel))
         if alt_labels:
-            tooltips[n].append(f"alt: {', '.join(str(l) for l in alt_labels)}")
+            tooltips[n].append(f"alt: {', '.join(str(alt) for alt in alt_labels)}")
         for p, o in g.predicate_objects(n):
             if p in datatype_properties:
                 tooltips[n].append(f"{_label(g, p)}: {o}")
@@ -416,12 +416,14 @@ def build_pyvis_html(
         # 2. Schema domain -> range relations
         domain = g.value(prop, RDFS.domain)
         range_ = g.value(prop, RDFS.range)
-        if isinstance(domain, URIRef) and isinstance(range_, URIRef):
-            if domain in nodes and range_ in nodes:
-                key = (str(domain), str(range_), prop_label)
-                if key not in edges_added:
-                    net.add_edge(str(domain), str(range_), label=prop_label)
-                    edges_added.add(key)
+        if (
+            isinstance(domain, URIRef) and isinstance(range_, URIRef)
+            and domain in nodes and range_ in nodes
+        ):
+            key = (str(domain), str(range_), prop_label)
+            if key not in edges_added:
+                net.add_edge(str(domain), str(range_), label=prop_label)
+                edges_added.add(key)
 
     net.set_options(json.dumps(_physics_options(show_physics_controls)))
     net.save_graph(output_path)

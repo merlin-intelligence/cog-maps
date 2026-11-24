@@ -6,8 +6,6 @@ import logging
 import os
 from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
-
 import nltk
 import requests
 import spacy
@@ -29,6 +27,7 @@ from cogmaps.config import scaleway_api_key as env_scaleway_key
 from cogmaps.core.embeddings import EmbeddingModel
 from cogmaps.core.llm_impacts import LLMCallImpact
 from cogmaps.ontology.store import OntologyJobStore
+from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import (
     UserDBError,
     current_user,
@@ -39,7 +38,8 @@ from cogmaps.ui.auth import (
     save_user_db,
     verify_password,
 )
-from cogmaps.qdrant.store import QdrantStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass

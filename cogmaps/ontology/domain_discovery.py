@@ -388,7 +388,7 @@ def load_manual_guidelines(collection: str, base_dir: str | None = None) -> str 
     path = manual_guidelines_path_for(collection, base_dir)
     if not os.path.exists(path):
         return None
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return f.read().strip() or None
 
 
@@ -398,7 +398,7 @@ def load_blueprint(collection: str, base_dir: str | None = None) -> DomainBluepr
     if not os.path.exists(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return DomainBlueprint.model_validate_json(f.read())
     except Exception:
         logger.warning("Failed to load cached domain blueprint from %s", path, exc_info=True)

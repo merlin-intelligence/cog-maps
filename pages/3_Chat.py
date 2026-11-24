@@ -43,7 +43,7 @@ if not sb.is_connected:
 store = QdrantStore(sb.qdrant_host, sb.qdrant_port)
 _visible = list_visible_collections(store.list_collections())
 col_labels = [label for label, _ in _visible]
-col_map = {label: qdrant_name for label, qdrant_name in _visible}
+col_map = dict(_visible)
 
 if not col_labels:
     empty_state("📂", "No collections found. Ingest documents in <strong>/enrich corpus/</strong> first.")

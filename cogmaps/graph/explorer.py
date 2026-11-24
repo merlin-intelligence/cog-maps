@@ -92,7 +92,7 @@ def _freeze_physics_after_stabilization(path: str) -> None:
         '}\n'
         '</script>\n'
     )
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         html_content = f.read()
     html_content = html_content.replace("</body>", snippet + "</body>", 1)
     with open(path, "w", encoding="utf-8") as f:
@@ -426,7 +426,7 @@ class GraphExplorer:
         net.set_options(json.dumps(_PHYSICS))
         rows, cols = np.where(np.triu(W_vis) > 0)
         edges = list(prompt_edges)
-        for r, c in zip(rows, cols):
+        for r, c in zip(rows, cols, strict=True):
             edges.append((int(r), int(c), float(W_vis[r, c])))
         net.add_edges(edges)
         net.save_graph(path)
@@ -467,18 +467,25 @@ class GraphExplorer:
             sum(1 for (a, b) in vis_edges if a == idx or b == idx)
             for idx in ordered_relevant
         ])
-        sizes = dict(zip(ordered_relevant, _scale_node_sizes(degrees)))
+        sizes = dict(zip(ordered_relevant, _scale_node_sizes(degrees), strict=True))
 
         for idx in ordered_relevant:
             p = graph.id_to_point[graph.ordered_ids[idx]]
-            if idx in spectral_indices: color = METHOD_COLORS["spectral_attention"]
-            elif idx in bridge_indices: color = METHOD_COLORS["semantic_bridge"]
-            elif idx in diversity_indices: color = METHOD_COLORS["supported_diversity"]
-            else: color = "#97c2fc"
+            if idx in spectral_indices:
+                color = METHOD_COLORS["spectral_attention"]
+            elif idx in bridge_indices:
+                color = METHOD_COLORS["semantic_bridge"]
+            elif idx in diversity_indices:
+                color = METHOD_COLORS["supported_diversity"]
+            else:
+                color = "#97c2fc"
             methods = []
-            if idx in spectral_indices: methods.append("spectral_attention")
-            if idx in bridge_indices: methods.append("semantic_bridge")
-            if idx in diversity_indices: methods.append("supported_diversity")
+            if idx in spectral_indices:
+                methods.append("spectral_attention")
+            if idx in bridge_indices:
+                methods.append("semantic_bridge")
+            if idx in diversity_indices:
+                methods.append("supported_diversity")
             # See _render_main_graph: pyvis titles render as HTML, so corpus
             # text must be escaped to avoid stored XSS.
             safe_filename = html.escape(str(p.payload.get("filename", "N/A")))
@@ -506,9 +513,12 @@ class GraphExplorer:
         for idx in relevant:
             p = graph.id_to_point[graph.ordered_ids[idx]]
             methods_display = []
-            if idx in spectral_indices: methods_display.append("spectral_attention")
-            if idx in bridge_indices: methods_display.append("semantic_bridge")
-            if idx in diversity_indices: methods_display.append("supported_diversity")
+            if idx in spectral_indices:
+                methods_display.append("spectral_attention")
+            if idx in bridge_indices:
+                methods_display.append("semantic_bridge")
+            if idx in diversity_indices:
+                methods_display.append("supported_diversity")
             out.append({
                 "filename": p.payload.get("filename", "N/A"),
                 "text": p.payload.get("text", "N/A"),
@@ -550,9 +560,12 @@ class GraphExplorer:
         for idx, pid in enumerate(graph.ordered_ids):
             p = graph.id_to_point[pid]
             methods = []
-            if idx in spectral_indices: methods.append("spectral_attention")
-            if idx in bridge_indices: methods.append("semantic_bridge")
-            if idx in diversity_indices: methods.append("supported_diversity")
+            if idx in spectral_indices:
+                methods.append("spectral_attention")
+            if idx in bridge_indices:
+                methods.append("semantic_bridge")
+            if idx in diversity_indices:
+                methods.append("supported_diversity")
             sanitized = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", str(p.payload.get("text", "")))
             node_rows.append({
                 "Node ID": idx,
@@ -563,7 +576,7 @@ class GraphExplorer:
             })
         edge_rows = []
         rows, cols = np.where(np.triu(graph.W) > 0)
-        for r, c in zip(rows, cols):
+        for r, c in zip(rows, cols, strict=True):
             edge_rows.append({"Source Node": int(r), "Target Node": int(c), "Weight": float(graph.W[r, c])})
 
         with pd.ExcelWriter(path) as writer:

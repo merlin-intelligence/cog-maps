@@ -8,7 +8,7 @@ import datetime
 import logging
 import random
 import uuid
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 from qdrant_client import QdrantClient, models
