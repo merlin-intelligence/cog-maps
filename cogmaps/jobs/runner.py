@@ -109,7 +109,7 @@ class JobRunner:
     def _cleanup_downloaded_source(dirs_file: str, log) -> None:
         """Delete any ingested directory that lives under downloaded_corpus/."""
         try:
-            with open(dirs_file, "r", encoding="utf-8", errors="ignore") as f:
+            with open(dirs_file, encoding="utf-8", errors="ignore") as f:
                 directories = [line.strip().strip("'\"") for line in f if line.strip()]
         except OSError:
             return

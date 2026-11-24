@@ -17,13 +17,13 @@ from cogmaps.core.corpus_analysis import (
     topic_model,
     type_counts,
 )
+from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import (
     check_password,
     list_visible_collections,
 )
 from cogmaps.ui.components import empty_state, render_sidebar, section_header
 from cogmaps.ui.styles import apply_global_styles
-from cogmaps.qdrant.store import QdrantStore
 
 apply_global_styles()
 if not check_password():
@@ -39,7 +39,7 @@ if not sb.is_connected:
 store = QdrantStore(sb.qdrant_host, sb.qdrant_port)
 _visible = list_visible_collections(store.list_collections())
 col_labels = [label for label, _ in _visible]
-col_map = {label: qdrant_name for label, qdrant_name in _visible}
+col_map = dict(_visible)
 
 if not col_labels:
     empty_state("📂", "No collections found. Ingest documents via <strong>/enrich corpus/</strong> first.")

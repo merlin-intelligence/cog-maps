@@ -8,9 +8,8 @@ import tempfile
 
 import streamlit as st
 
-logger = logging.getLogger(__name__)
-
 from cogmaps.graph.explorer import GraphExplorer
+from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import (
     check_password,
     list_visible_collections,
@@ -23,7 +22,8 @@ from cogmaps.ui.components import (
     section_header,
 )
 from cogmaps.ui.styles import apply_global_styles, badge
-from cogmaps.qdrant.store import QdrantStore
+
+logger = logging.getLogger(__name__)
 
 apply_global_styles()
 if not check_password():
@@ -39,7 +39,7 @@ if not sb.is_connected:
 store = QdrantStore(sb.qdrant_host, sb.qdrant_port)
 _visible = list_visible_collections(store.list_collections())
 col_labels = [label for label, _ in _visible]
-col_map = {label: qdrant_name for label, qdrant_name in _visible}
+col_map = dict(_visible)
 
 if not col_labels:
     empty_state("📂", "No collections found. Go to <strong>/enrich corpus/</strong> to ingest documents first.")
@@ -100,7 +100,7 @@ if st.button("▶ generate graph", type="primary"):
                                 f'{swatches}</div>',
                                 unsafe_allow_html=True,
                             )
-                        with open(art.graph_html, "r", encoding="utf-8") as f:
+                        with open(art.graph_html, encoding="utf-8") as f:
                             st.components.v1.html(f.read(), height=900, scrolling=True)
 
                     with tab_methods:
@@ -111,7 +111,7 @@ if st.button("▶ generate graph", type="primary"):
                             f'{badge("supported_diversity")} supported diversity</div>',
                             unsafe_allow_html=True,
                         )
-                        with open(art.methods_html, "r", encoding="utf-8") as f:
+                        with open(art.methods_html, encoding="utf-8") as f:
                             st.components.v1.html(f.read(), height=900, scrolling=True)
 
                     with tab_eigen:
@@ -142,15 +142,12 @@ if st.button("▶ generate graph", type="primary"):
 
                     with tab_dl:
                         c1, c2, c3, c4 = st.columns(4)
-                        with c1:
-                            with open(art.graph_html, "rb") as f:
-                                st.download_button("graph .html", f, os.path.basename(art.graph_html), mime="text/html")
-                        with c2:
-                            with open(art.methods_html, "rb") as f:
-                                st.download_button("methods .html", f, os.path.basename(art.methods_html), mime="text/html")
-                        with c3:
-                            with open(art.eigenvalue_png, "rb") as f:
-                                st.download_button("eigenvalues .png", f, os.path.basename(art.eigenvalue_png), mime="image/png")
+                        with c1, open(art.graph_html, "rb") as f:
+                            st.download_button("graph .html", f, os.path.basename(art.graph_html), mime="text/html")
+                        with c2, open(art.methods_html, "rb") as f:
+                            st.download_button("methods .html", f, os.path.basename(art.methods_html), mime="text/html")
+                        with c3, open(art.eigenvalue_png, "rb") as f:
+                            st.download_button("eigenvalues .png", f, os.path.basename(art.eigenvalue_png), mime="image/png")
                         with c4:
                             st.download_button(
                                 "analysis .txt",

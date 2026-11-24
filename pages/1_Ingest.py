@@ -7,15 +7,14 @@ import os
 import re
 import tempfile
 import uuid
-from typing import Callable
+from collections.abc import Callable
 
 import streamlit as st
-
-logger = logging.getLogger(__name__)
 
 from cogmaps.config import ocr_available, sharepoint_credentials
 from cogmaps.jobs.runner import JobRunner
 from cogmaps.jobs.store import JobStore
+from cogmaps.qdrant.store import QdrantStore
 from cogmaps.ui.auth import (
     check_password,
     current_user,
@@ -33,11 +32,13 @@ from cogmaps.ui.components import (
     section_header,
 )
 from cogmaps.ui.styles import apply_global_styles, badge
-from cogmaps.qdrant.store import QdrantStore
+
+logger = logging.getLogger(__name__)
 
 try:
-    from cogmaps.connectors.gdrive import GDriveClient
     from google.auth.exceptions import RefreshError
+
+    from cogmaps.connectors.gdrive import GDriveClient
     GDRIVE_AVAILABLE = True
 except ImportError:
     GDRIVE_AVAILABLE = False
@@ -81,9 +82,9 @@ if not sb.is_connected:
 store = QdrantStore(sb.qdrant_host, sb.qdrant_port)
 _visible = list_visible_collections(store.list_collections())
 # For ingestion, non-admins can only write to their own private collections.
-_editable = _visible if is_admin() else [(l, q) for l, q in _visible if not l.startswith("[public] ")]
+_editable = _visible if is_admin() else [(label, q) for label, q in _visible if not label.startswith("[public] ")]
 existing_col_labels = [label for label, _ in _editable]
-existing_col_map = {label: qdrant_name for label, qdrant_name in _editable}
+existing_col_map = dict(_editable)
 
 # ── Source & collection selection ─────────────────────────────────────
 col_src, col_mode = st.columns(2)
@@ -218,7 +219,7 @@ def _render_job_status() -> None:
     last_rowid = st.session_state.get("log_cursor", 0)
     new_entries = _job_store().get_logs(job_id, after_rowid=last_rowid)
     if new_entries:
-        rowids, messages = zip(*new_entries)
+        rowids, messages = zip(*new_entries, strict=True)
         st.session_state["log_cursor"] = rowids[-1]
         buf = st.session_state.get("log_buffer", "")
         st.session_state["log_buffer"] = buf + "\n".join(messages) + "\n"

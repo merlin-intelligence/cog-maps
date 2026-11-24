@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-
 from litellm.types.utils import Choices, Message, ModelResponse
 
 from cogmaps import config

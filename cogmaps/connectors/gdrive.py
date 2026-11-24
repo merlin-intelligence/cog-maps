@@ -43,7 +43,7 @@ class GDriveClient:
         self._service = service
 
     @classmethod
-    def from_oauth(cls, client_secrets_path: str, token_path: str) -> "GDriveClient":
+    def from_oauth(cls, client_secrets_path: str, token_path: str) -> GDriveClient:
         """Authenticate via OAuth Client ID, caching the token at ``token_path``."""
         creds = None
         if os.path.exists(token_path):
@@ -73,7 +73,7 @@ class GDriveClient:
         return cls(build("drive", "v3", credentials=creds))
 
     @classmethod
-    def from_service_account(cls, service_account_path: str) -> "GDriveClient":
+    def from_service_account(cls, service_account_path: str) -> GDriveClient:
         """Authenticate via a Service Account JSON file."""
         creds = service_account.Credentials.from_service_account_file(service_account_path, scopes=SCOPES)
         return cls(build("drive", "v3", credentials=creds))

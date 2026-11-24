@@ -313,7 +313,7 @@ with tab_ask:
             "the source chunks behind it. Follow-up questions keep the conversation's context."
         )
 
-    for i, (turn, view) in enumerate(zip(conversation.turns, state["views"])):
+    for i, (turn, view) in enumerate(zip(conversation.turns, state["views"], strict=False)):
         with st.chat_message("user"):
             st.write(turn.question)
         with st.chat_message("assistant"):

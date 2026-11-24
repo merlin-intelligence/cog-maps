@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 
 from chunknorris.chunkers import MarkdownChunker
 from chunknorris.parsers import CSVParser, DocxParser, ExcelParser, MarkdownParser, PdfParser
-from collections import Counter
 from chunknorris.parsers.pdf.pdf_parser import TextLine
 
 from cogmaps.config import get_ocr_languages, ocr_available
@@ -23,7 +23,7 @@ def _safe_get_line_spacing(lines: list[TextLine]) -> float:
     linespace_counts = Counter(
         (
             round(curr_line.bbox.y0 - prev_line.bbox.y1, 1)
-            for curr_line, prev_line in zip(lines[1:], lines[:-1])
+            for curr_line, prev_line in zip(lines[1:], lines[:-1], strict=True)
         )
     )
     if not linespace_counts:
@@ -92,7 +92,7 @@ def chunk_with_chunknorris(filepath: str):
         # We read manually with errors="replace" (not "ignore") so a non-UTF8 file
         # still ingests, with bad bytes visibly turned into '�' rather than
         # silently dropped.
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
             text = f.read()
         if "�" in text:
             logger.warning(

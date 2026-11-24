@@ -100,7 +100,7 @@ def load_user_db() -> dict:
         save_user_db(initial)
         return initial
     try:
-        with open(USER_DB_PATH, "r") as f:
+        with open(USER_DB_PATH) as f:
             db = json.load(f)
     except Exception as e:
         raise UserDBError(f"could not read {USER_DB_PATH}: {e}") from e

@@ -374,7 +374,7 @@ def get_ocr_languages() -> str:
     try:
         langs = [f.split(".")[0] for f in os.listdir(tessdata_dir) if f.endswith(".traineddata")]
         # Exclude 'osd' (Orientation and Script Detection) which is not a language
-        langs = [l for l in langs if l != "osd"]
+        langs = [lang for lang in langs if lang != "osd"]
         return "+".join(sorted(langs)) if langs else "eng"
     except Exception:
         return "eng"
