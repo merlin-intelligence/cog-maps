@@ -406,6 +406,7 @@ def render_llm_impacts_footer(calls: list[LLMCallImpact], *, key: str) -> None:
                 "time": c.timestamp[11:19],
                 "model": c.model,
                 "tokens in": c.input_tokens,
+                "cached in": c.cached_tokens,
                 "tokens out": c.output_tokens,
                 "latency": f"{c.latency_s:.1f} s",
                 "energy": _fmt(c.energy_kwh, 1e3, "Wh"),
@@ -426,4 +427,9 @@ def render_llm_impacts_footer(calls: list[LLMCallImpact], *, key: str) -> None:
     )
     if len(estimated) < len(calls):
         caption += " — : no estimate (local Ollama model or unknown model size)."
+    input_tokens = sum(c.input_tokens for c in calls)
+    if input_tokens:
+        cached = sum(c.cached_tokens for c in calls)
+        caption += (f" Prompt cache: {cached:,} of {input_tokens:,} input tokens "
+                    f"({cached / input_tokens:.0%}) served from the provider's cache.")
     st.caption(caption)
