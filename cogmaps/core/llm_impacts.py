@@ -74,6 +74,10 @@ class LLMCallImpact:
     input_tokens: int
     output_tokens: int
     latency_s: float
+    # Part of ``input_tokens`` the provider served from its prompt cache (billed at a
+    # discount by Mistral and some Scaleway models). Defaulted so records stored
+    # before this field existed still load.
+    cached_tokens: int = 0
     energy_kwh: float | None = None
     gwp_kgco2eq: float | None = None
     adpe_kgsbeq: float | None = None
@@ -266,6 +270,7 @@ def estimate_impacts(litellm_model: str, response, latency_s: float) -> LLMCallI
     call = LLMCallImpact(
         model=litellm_model, input_tokens=input_tokens,
         output_tokens=output_tokens, latency_s=latency_s,
+        cached_tokens=_cached_tokens(usage),
     )
 
     provider, _, model = litellm_model.partition("/")
@@ -295,6 +300,20 @@ def estimate_impacts(litellm_model: str, response, latency_s: float) -> LLMCallI
     call.pe_mj = _mean(impacts.pe.value)
     call.wcf_l = _mean(impacts.wcf.value)
     return call
+
+
+def _cached_tokens(usage) -> int:
+    """Prompt tokens served from the provider's cache (OpenAI-style
+    ``usage.prompt_tokens_details.cached_tokens``), 0 when not reported."""
+    details = getattr(usage, "prompt_tokens_details", None)
+    if isinstance(details, dict):
+        value = details.get("cached_tokens")
+    else:
+        value = getattr(details, "cached_tokens", None)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _mean(value: float | RangeValue) -> float:

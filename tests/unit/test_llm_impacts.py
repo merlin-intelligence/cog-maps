@@ -205,3 +205,26 @@ def test_cancelling_the_task_cancels_a_pending_wait(monkeypatch):
             await task
 
     asyncio.run(asyncio.wait_for(main(), timeout=5))
+
+
+def test_cached_tokens_are_read_from_prompt_tokens_details():
+    usage = SimpleNamespace(prompt_tokens=1000, completion_tokens=200,
+                            prompt_tokens_details=SimpleNamespace(cached_tokens=768))
+    call = estimate_impacts("mistral/mistral-large-4", SimpleNamespace(usage=usage), latency_s=1.0)
+    assert call.cached_tokens == 768
+
+    usage.prompt_tokens_details = {"cached_tokens": 64}
+    call = estimate_impacts("scaleway/qwen3.8-27b", SimpleNamespace(usage=usage), latency_s=1.0)
+    assert call.cached_tokens == 64
+
+
+def test_cached_tokens_default_to_zero_when_not_reported():
+    assert estimate_impacts("scaleway/qwen3.8-27b", _response(), latency_s=1.0).cached_tokens == 0
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None)
+    assert estimate_impacts("scaleway/qwen3.8-27b", SimpleNamespace(usage=usage), latency_s=1.0).cached_tokens == 0
+
+
+def test_records_stored_without_cached_tokens_still_load():
+    data = estimate_impacts("scaleway/qwen3.8-27b", _response(), latency_s=1.0).to_dict()
+    del data["cached_tokens"]
+    assert LLMCallImpact.from_dict(data).cached_tokens == 0
